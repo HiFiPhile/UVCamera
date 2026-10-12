@@ -66,6 +66,12 @@ HAL/init interplay and host compatibility.
 - [x] Host test: YUYV 640×480@30 on Windows over SuperSpeed. Correct colors,
       but laggy at first; fixed (see "Isochronous reliability" below). Now
       30.0 fps with 0 failed frames.
+- [x] MJPEG 60 fps (`--mjpeg-fps 60 --mjpeg-fps 30 …`) over SuperSpeed on
+      Windows: 1080p60 and 720p60 sent at 60.0 fps; 1 failed frame in
+      ~1,120 at 1080p60 (~0.1%). The Camera app opened at 1080p30 and used
+      60 fps once it was selected. The pure-Rust test pattern encoder needs
+      up to 42 ms per 1080p frame before caching, so real 1080p60 needs a
+      hardware or NEON JPEG encoder (Phase 3).
 - [x] Live stats every 5 s: frames sent, frames the kernel flagged as not
       fully transferred, starvation, max completion gap, produce time.
 - [ ] Host test: Linux `ffplay`, macOS

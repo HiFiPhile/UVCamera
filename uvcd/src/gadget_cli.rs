@@ -184,7 +184,10 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
     let specs = cli
         .formats
         .iter()
-        .map(|&kind| FormatSpec::default_for(kind))
+        .map(|&kind| match kind {
+            FormatKind::Mjpeg => FormatSpec::default_for(kind).with_fps(&cli.mjpeg_fps),
+            FormatKind::Yuyv => FormatSpec::default_for(kind),
+        })
         .collect::<Vec<_>>();
 
     state.save(state_file)?;
@@ -281,6 +284,16 @@ struct UpCli {
     /// Formats to advertise, in order of preference.
     #[arg(long = "format", value_name = "FORMAT", default_values = ["mjpeg", "yuyv"])]
     formats: Vec<FormatKind>,
+
+    /// Frame rates offered for every MJPEG frame size. The highest is the
+    /// default.
+    #[arg(
+        long = "mjpeg-fps",
+        value_name = "FPS",
+        default_values_t = [30, 15],
+        value_parser = clap::value_parser!(u32).range(1..=120)
+    )]
+    mjpeg_fps: Vec<u32>,
 
     /// USB device controller to bind (default: the gadget's current one).
     #[arg(long, value_name = "NAME")]

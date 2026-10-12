@@ -144,6 +144,14 @@ impl FormatSpec {
         };
         Self { kind, frames }
     }
+
+    /// Replace the frame rates of every frame.
+    pub fn with_fps(mut self, fps: &[u32]) -> Self {
+        for frame in &mut self.frames {
+            *frame = FrameSpec::new(frame.width, frame.height, fps);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +243,17 @@ mod tests {
         assert_eq!(frame.closest_interval(400_000), 333_333);
         assert_eq!(frame.closest_interval(600_000), 666_666);
         assert_eq!(frame.closest_interval(10_000_000), 666_666);
+    }
+
+    #[test]
+    fn with_fps_replaces_intervals() {
+        let spec = FormatSpec::default_for(FormatKind::Mjpeg).with_fps(&[30, 60]);
+        assert!(
+            spec.frames
+                .iter()
+                .all(|f| f.intervals == vec![166_666, 333_333])
+        );
+        assert_eq!(spec.frames[0].default_interval(), 166_666);
     }
 
     #[test]

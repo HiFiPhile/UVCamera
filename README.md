@@ -51,7 +51,8 @@ adb shell su -c /data/local/tmp/uvcd gadget down      # from another shell
 
 The host sees a "UVCamera" webcam offering MJPEG and YUYV. `gadget down` (or
 Ctrl-C) removes the function and restores the original USB configuration.
-Options: `--format mjpeg|yuyv` (repeatable), `--maxburst N` for SuperSpeed,
+Options: `--format mjpeg|yuyv` (repeatable), `--mjpeg-fps N` (repeatable,
+e.g. `--mjpeg-fps 60 --mjpeg-fps 30`), `--maxburst N` for SuperSpeed,
 `--log-level debug` to log every control request.
 
 ## Building
