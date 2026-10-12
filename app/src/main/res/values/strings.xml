@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<resources>
+    <string name="app_name" translatable="false">UVCamera</string>
+    <string name="cameras_title">Camera capabilities</string>
+    <string name="cameras_subtitle">Sizes each camera can stream at 30 fps or faster. These are the candidates to advertise to the USB host.</string>
+    <string name="cameras_none">No cameras found</string>
+    <string name="cameras_error">Failed to query cameras: %1$s</string>
+    <string name="camera_title">Camera %1$s (%2$s)</string>
+    <string name="camera_facing_back">back</string>
+    <string name="camera_facing_front">front</string>
+    <string name="camera_facing_external">external</string>
+    <string name="camera_hardware_level">Hardware level: %1$s</string>
+    <string name="camera_format_sizes">%1$s: %2$s</string>
+    <string name="camera_format_none">%1$s: none at 30 fps</string>
+</resources>
