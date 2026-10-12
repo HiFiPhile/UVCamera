@@ -24,26 +24,52 @@ camera screen. These two inputs decide Phase 1 scope and the encoder strategy.
 
 ## Phase 1: gadget bring-up with a test pattern (no app)
 
-Goal: the host shows a moving test pattern from `uvcd gadget up --test-pattern`
-run as root through `adb shell su`. This validates the kernel, UDC
-bandwidth, gadget HAL interplay and host compatibility.
+Goal: the host shows a moving test pattern from `uvcd gadget up`, run as root
+through `adb shell su`. This validates the kernel, UDC bandwidth, gadget
+HAL/init interplay and host compatibility.
 
-1. Port MSD's `usb.rs` into `uvcd/src/gadget/` (configfs helpers, HAL
-   stopper, UDC rebind).
-2. `gadget/uvc.rs`: build `functions/uvc.uvcamera` from a `FormatSpec`
-   (control header + class links, streaming header, uncompressed/mjpeg
-   formats and frames, color matching, `streaming_maxpacket`,
-   `function_name`). Teardown in reverse order.
-3. `v4l2/`: minimal ioctl bindings (`rustix::ioctl`) and the uapi structs from
-   `linux/videodev2.h` and `linux/usb/g_uvc.h`.
-4. `uvc/`: PROBE/COMMIT state machine (GET_CUR/MIN/MAX/DEF/LEN/INFO,
-   SET_CUR), request-error-code control, stub camera/processing unit
-   controls. **Host unit tests** with captured request sequences from
-   Linux/Windows/macOS.
-5. Test source: YUYV moving color bars (no encoder needed). Optionally add
-   MJPEG via the pure-Rust `jpeg-encoder` crate for the test pattern only.
-6. `gadget up` / `gadget down` CLI; restore the device class and links on
-   exit/SIGTERM.
+- [x] `gadget.rs`: configfs ops (UDC bind/unbind, config link named
+      `uvcamera`, IAD device class `EF/02/01`) and the UVC function builder:
+      control header + class links, MJPEG/YUYV formats and frames, streaming
+      header + fs/hs/ss class links, `streaming_maxpacket/maxburst`,
+      `function_name`. Kernel-assigned `bFormatIndex`/`bFrameIndex` and
+      entity IDs are read back. Teardown handles partial state.
+- [x] `v4l2.rs`: ioctl bindings (events, `UVCIOC_SEND_RESPONSE`, S_FMT,
+      MMAP buffers, STREAMON/OFF). Struct sizes are asserted at compile time
+      for 64-bit and armv7, and ioctl numbers are checked against the
+      kernel headers.
+- [x] `uvc/`: PROBE/COMMIT negotiation (GET_CUR/MIN/MAX/DEF/RES/LEN/INFO,
+      SET_CUR with data stage), request-error-code control, and the controls
+      the kernel's default descriptors advertise (CT AE mode, PU
+      brightness). Unit tested.
+- [x] `pattern.rs`: color bars, a sweeping box and a 00–59 counter. YUYV is
+      rendered per frame; MJPEG is encoded with `jpeg-encoder` and cached
+      for a 60-frame loop.
+- [x] `stream.rs`: poll loop over V4L2 events and buffer completions, with
+      frames paced to the committed interval. Reopens the node if a USB mode
+      switch rebinds the gadget.
+- [x] `gadget up` / `gadget down`, with a state file so `down` restores
+      everything after a crash.
+- [x] On-device dry run (OnePlus 15, no host attached): build, bind, node
+      discovery (`/dev/video2`, `g_uvc`), subscribe and teardown all work;
+      the original config is restored.
+- [x] Host test: Windows 11 Camera app (2026-10-12). It picked MJPEG
+      1920×1080 and held 30.0 fps with 0 late frames over 24 s and 137 s
+      sessions. MTP kept working alongside. The link was High Speed (USB 2
+      cable/port). On plug-in Android rebound the gadget; the video node
+      disappeared and uvcd reopened it automatically, so our link survives
+      the vendor init's USB handling. Windows also probes CT exposure time
+      (0x04) and iris (0x09) with GET_INFO and reads the error code after our
+      stalls.
+- [ ] Host test: YUYV on Windows, SuperSpeed link with `--maxburst`
+- [ ] Host test: Linux `ffplay`, macOS
+- [x] Windows request sequence captured as a unit test
+      (`windows_11_camera_app_sequence`); Linux/macOS still to capture
+
+Default formats: MJPEG 1920×1080, 1280×720 and 640×480 at 30/15 fps; YUYV
+640×480 at 30/15 and 1280×720 at 10. The isochronous endpoint defaults to
+`maxpacket=3072`, `maxburst=0` (24.5 MB/s at both HS and SS); raise
+`--maxburst` for YUYV at higher sizes over SuperSpeed.
 
 **Exit:** test pattern plays in `ffplay /dev/videoX` on Linux, the Windows
 Camera app, and macOS QuickTime/FaceTime. ADB stays usable throughout. Repeated
@@ -122,7 +148,7 @@ Device matrix (to fill from `doctor.log`):
 
 | Device | Android | Kernel | F_UVC | UDC / max speed | Root | Status |
 |---|---|---|---|---|---|---|
-| OnePlus 15 (CPH2747, Qualcomm) | 16 (API 36) | 6.12.58 GKI android16 | `=y` | a600000.dwc3 / super-speed(-plus) | KernelSU | doctor ✅, Phase 1 next |
+| OnePlus 15 (CPH2747, Qualcomm) | 16 (API 36) | 6.12.58 GKI android16 | `=y` | a600000.dwc3 / super-speed(-plus) | KernelSU | doctor ✅, Phase 1 ✅ on Windows (MJPEG 1080p30) |
 
 ### Device notes: OnePlus 15 (CPH2747), 2026-10-12
 

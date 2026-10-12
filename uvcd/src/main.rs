@@ -4,6 +4,12 @@
 // Based on msd-tool from MSD.
 
 mod doctor;
+mod gadget;
+mod gadget_cli;
+mod pattern;
+mod stream;
+mod uvc;
+mod v4l2;
 
 use std::{
     fmt,
@@ -17,6 +23,7 @@ use tracing::{Level, error};
 #[derive(Debug, Subcommand)]
 enum Command {
     Doctor(doctor::DoctorCli),
+    Gadget(gadget_cli::GadgetCli),
 }
 
 #[derive(Debug, Default, Clone, Copy, ValueEnum)]
@@ -86,6 +93,7 @@ fn main() -> ExitCode {
 
     let ret = match cli.command {
         Command::Doctor(c) => doctor::subcommand_doctor(&c),
+        Command::Gadget(c) => gadget_cli::subcommand_gadget(&c),
     };
 
     match ret {

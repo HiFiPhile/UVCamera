@@ -10,8 +10,8 @@ gadget. The app captures from the camera with Camera2 and streams frames to the
 daemon. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** early development (Phase 0). The module currently installs the app
-and writes a device capability report. It does not stream yet.
+**Status:** early development (Phase 1). `uvcd gadget up` streams a test
+pattern to the host, without the app. The camera path comes in Phase 3.
 
 ## Requirements
 
@@ -37,6 +37,22 @@ adb shell su -c /data/local/tmp/uvcd doctor --probe-function
 
 `--probe-function` creates and immediately removes an unlinked UVC function in
 configfs. It never changes the active USB configuration.
+
+## Streaming a test pattern
+
+Over wireless ADB (USB ADB drops while the gadget is rebound), with the phone
+plugged into the host:
+
+```sh
+adb push target/aarch64-linux-android/release/uvcd /data/local/tmp/
+adb shell su -c /data/local/tmp/uvcd gadget up        # runs until stopped
+adb shell su -c /data/local/tmp/uvcd gadget down      # from another shell
+```
+
+The host sees a "UVCamera" webcam offering MJPEG and YUYV. `gadget down` (or
+Ctrl-C) removes the function and restores the original USB configuration.
+Options: `--format mjpeg|yuyv` (repeatable), `--maxburst N` for SuperSpeed,
+`--log-level debug` to log every control request.
 
 ## Building
 
