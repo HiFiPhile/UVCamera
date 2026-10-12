@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     gadget::{DEVICE_CLASS_IAD, EndpointConfig, Gadget, resolve_udc},
+    irq::IrqBoost,
     stream::{Exit, Streamer},
     uvc::{
         Protocol,
@@ -219,7 +220,8 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
 
             let protocol =
                 Protocol::new(table.clone(), entities, endpoint.max_payload(Speed::High));
-            match Streamer::new(dev, protocol, endpoint).run(&stop)? {
+            let irq_boost = (!cli.no_irq_boost).then(|| IrqBoost::new(&udc));
+            match Streamer::new(dev, protocol, endpoint, irq_boost).run(&stop)? {
                 Exit::Stopped => break,
                 Exit::DeviceGone => warn!("Video node went away; reopening"),
             }
@@ -291,6 +293,11 @@ struct UpCli {
     /// Isochronous max burst for SuperSpeed (0-15).
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=15))]
     maxburst: u32,
+
+    /// Don't raise the USB controller's IRQ thread to real-time priority
+    /// while streaming.
+    #[arg(long)]
+    no_irq_boost: bool,
 }
 
 #[derive(Debug, Subcommand)]

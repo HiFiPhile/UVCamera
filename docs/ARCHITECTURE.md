@@ -191,7 +191,11 @@ selected camera's streamable sizes (≥ 30 fps), clipped to bandwidth:
 | H.264 (frame-based) | as MJPEG | ≪ 1 MB/s; Phase 5 |
 
 `streaming_maxpacket=3072` (HS high-bandwidth, 3×1024) and, on SuperSpeed
-UDCs, `streaming_maxburst` raise isochronous throughput. `uvcd` derives
+UDCs, `streaming_maxburst` raise isochronous throughput. On pre-6.13 kernels,
+larger bursts also shrink the timing margin, so uvcd uses the smallest burst
+that fits. While streaming, it raises the USB controller's IRQ thread to
+SCHED_FIFO; without that, the phone dropped up to 6% of YUYV frames (see
+PLAN.md, "Isochronous reliability"). `uvcd` derives
 `dwMaxVideoFrameBufferSize` and bitrates itself and keeps its own format
 table. It does not depend on the kernel's `VIDIOC_ENUM_FMT` support, which
 only newer kernels have.
@@ -228,6 +232,8 @@ MSD's `msd_daemon`. Minimum rules:
   HAL domain (`hal_usb_gadget_default`)
 - read `usb_control_prop` (`sys.usb.controller`), sysfs (`/sys/class/udc`,
   `video4linux`)
+- `capability sys_nice` and `process {getsched setsched}` on `kernel` (the
+  controller's IRQ thread), plus `/proc/<pid>/comm` read for kernel threads
 - `untrusted_app → uvcamera_daemon:unix_stream_socket connectto`
 - **Deny self-connect.** The daemon refuses to serve unless SELinux is
   enforcing and a connection to itself fails. This proves the policy is loaded

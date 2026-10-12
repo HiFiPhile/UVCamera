@@ -61,15 +61,50 @@ HAL/init interplay and host compatibility.
       the vendor init's USB handling. Windows also probes CT exposure time
       (0x04) and iris (0x09) with GET_INFO and reads the error code after our
       stalls.
-- [ ] Host test: YUYV on Windows, SuperSpeed link with `--maxburst`
+- [x] Host test: SuperSpeed (USB 3 cable/port), MJPEG 1080p30 and 480p30,
+      0 late frames.
+- [x] Host test: YUYV 640×480@30 on Windows over SuperSpeed. Correct colors,
+      but laggy at first; fixed (see "Isochronous reliability" below). Now
+      30.0 fps with 0 failed frames.
+- [x] Live stats every 5 s: frames sent, frames the kernel flagged as not
+      fully transferred, starvation, max completion gap, produce time.
 - [ ] Host test: Linux `ffplay`, macOS
 - [x] Windows request sequence captured as a unit test
       (`windows_11_camera_app_sequence`); Linux/macOS still to capture
 
 Default formats: MJPEG 1920×1080, 1280×720 and 640×480 at 30/15 fps; YUYV
 640×480 at 30/15 and 1280×720 at 10. The isochronous endpoint defaults to
-`maxpacket=3072`, `maxburst=0` (24.5 MB/s at both HS and SS); raise
-`--maxburst` for YUYV at higher sizes over SuperSpeed.
+`maxpacket=3072`, `maxburst=0` (24.5 MB/s at both HS and SS).
+
+### Isochronous reliability (GKI 6.12, OnePlus 15)
+
+YUYV 640×480@30 looked laggy without artifacts. Windows was discarding
+incomplete frames, which the kernel returns with `V4L2_BUF_FLAG_ERROR` after
+a missed isochronous slot (`-EXDEV`). Measured failed frames:
+
+| Setup | Failed frames |
+|---|---|
+| `maxburst 6` (21.5 KB per 125 µs request) | ~22% |
+| `maxburst 0` (3 KB requests) | ~6% |
+| `maxburst 0` + dwc3 IRQ thread at SCHED_FIFO 50 | 0% |
+
+Causes:
+- **Request pool too shallow.** Pre-6.13 f_uvc uses
+  `req_size = maxpacket × burst × mult` and allocates
+  `clamp(imagesize / 2 / req_size, 4, 64)` requests, about half of them in
+  flight. With large bursts only ~1 ms is buffered. Small requests hit the
+  64 cap, about 4 ms. 6.13+ instead spreads frames over the interval set by
+  `VIDIOC_S_PARM`, which uvcd sends; 6.12 returns ENOTTY.
+- **IRQ thread priority.** The Qualcomm dwc3 driver runs its threaded IRQ
+  handler as SCHED_NORMAL ("Set IRQ thread … to SCHED_NORMAL prio" in
+  dmesg), so CPU load delays request completions past the buffered time.
+  uvcd now raises `irq/<n>-<udc driver>` to SCHED_FIFO 50 at stream start
+  and restores it at stop (`--no-irq-boost` disables this). The thread is
+  recreated, and reset by the vendor driver, on every gadget bind.
+
+Rule of thumb: use the smallest `maxburst` that covers the largest advertised
+uncompressed frame rate, because bigger bursts shrink the timing margin on
+pre-6.13 kernels.
 
 **Exit:** test pattern plays in `ffplay /dev/videoX` on Linux, the Windows
 Camera app, and macOS QuickTime/FaceTime. ADB stays usable throughout. Repeated

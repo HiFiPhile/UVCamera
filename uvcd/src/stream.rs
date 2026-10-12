@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     gadget::EndpointConfig,
+    irq::IrqBoost,
     pattern::TestPattern,
     uvc::{Protocol, Reply, StreamParams},
     v4l2::{Event, Speed, VideoDevice},
@@ -23,6 +24,8 @@ use crate::{
 const BUFFER_COUNT: u32 = 4;
 /// Upper bound on poll() sleeps so stop requests are noticed promptly.
 const MAX_WAIT: Duration = Duration::from_millis(100);
+/// How often streaming statistics are logged.
+const STATS_PERIOD: Duration = Duration::from_secs(5);
 
 /// Why [`Streamer::run`] returned.
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +34,25 @@ pub enum Exit {
     Stopped,
     /// The video node went away (gadget unbound or function removed).
     DeviceGone,
+}
+
+/// Counters for one [`STATS_PERIOD`] window.
+#[derive(Default)]
+struct Stats {
+    /// Frames handed to the driver.
+    queued: u64,
+    /// Buffers the driver finished sending.
+    completed: u64,
+    /// Completed buffers the driver flagged as not fully transferred.
+    failed: u64,
+    /// Times a frame was due but every buffer was still owned by the driver.
+    starved: u64,
+    /// Longest time between two buffer completions.
+    max_gap: Duration,
+    last_completion: Option<Instant>,
+    /// Time spent producing and copying frames.
+    produce_total: Duration,
+    produce_max: Duration,
 }
 
 struct ActiveStream {
@@ -42,21 +64,30 @@ struct ActiveStream {
     sequence: u64,
     dropped: u64,
     started: Instant,
+    stats: Stats,
+    stats_since: Instant,
 }
 
 pub struct Streamer {
     dev: VideoDevice,
     protocol: Protocol,
     endpoint: EndpointConfig,
+    irq_boost: Option<IrqBoost>,
     stream: Option<ActiveStream>,
 }
 
 impl Streamer {
-    pub fn new(dev: VideoDevice, protocol: Protocol, endpoint: EndpointConfig) -> Self {
+    pub fn new(
+        dev: VideoDevice,
+        protocol: Protocol,
+        endpoint: EndpointConfig,
+        irq_boost: Option<IrqBoost>,
+    ) -> Self {
         Self {
             dev,
             protocol,
             endpoint,
+            irq_boost,
             stream: None,
         }
     }
@@ -100,6 +131,7 @@ impl Streamer {
             if self.stream.is_some() {
                 self.reclaim_buffers()?;
                 self.feed_frame()?;
+                self.report_stats();
             }
             if revents.contains(PollFlags::ERR) && self.stream.is_none() {
                 return Ok(Exit::DeviceGone);
@@ -164,12 +196,21 @@ impl Streamer {
         let params = self.protocol.committed();
         info!("Host started streaming {params:?}");
 
+        if let Some(boost) = &mut self.irq_boost {
+            boost.apply();
+        }
+
         self.dev.set_format(
             params.kind.fourcc(),
             params.width,
             params.height,
             params.max_frame_size,
         )?;
+        if !self.dev.set_frame_interval(params.interval)? {
+            // Pre-6.13 f_uvc sizes isochronous requests from the endpoint
+            // configuration alone and needs no interval.
+            debug!("Kernel does not support VIDIOC_S_PARM");
+        }
         let count = self.dev.allocate_buffers(BUFFER_COUNT)?;
 
         let now = Instant::now();
@@ -181,6 +222,8 @@ impl Streamer {
             sequence: 0,
             dropped: 0,
             started: now,
+            stats: Stats::default(),
+            stats_since: now,
         });
 
         // Queue the first frame before STREAMON so data flows immediately.
@@ -190,6 +233,10 @@ impl Streamer {
     }
 
     fn stop_stream(&mut self) {
+        if let Some(boost) = &mut self.irq_boost {
+            boost.restore();
+        }
+
         let Some(stream) = self.stream.take() else {
             // Still acknowledge a SET_INTERFACE(0) if the kernel deferred it.
             let _ = self.dev.stream_off();
@@ -216,10 +263,41 @@ impl Streamer {
 
     fn reclaim_buffers(&mut self) -> Result<()> {
         let stream = self.stream.as_mut().unwrap();
-        while let Some(index) = self.dev.dequeue_buffer()? {
+        while let Some((index, failed)) = self.dev.dequeue_buffer()? {
             stream.free.push(index);
+
+            let now = Instant::now();
+            let stats = &mut stream.stats;
+            if let Some(last) = stats.last_completion {
+                stats.max_gap = stats.max_gap.max(now - last);
+            }
+            stats.last_completion = Some(now);
+            stats.completed += 1;
+            stats.failed += u64::from(failed);
         }
         Ok(())
+    }
+
+    fn report_stats(&mut self) {
+        let stream = self.stream.as_mut().unwrap();
+        let elapsed = stream.stats_since.elapsed();
+        if elapsed < STATS_PERIOD {
+            return;
+        }
+
+        let s = std::mem::take(&mut stream.stats);
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        info!(
+            "Stats: sent {:.1} fps, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
+            s.completed as f64 / elapsed.as_secs_f64(),
+            s.failed,
+            s.queued,
+            s.starved,
+            ms(s.max_gap),
+            ms(s.produce_total) / s.queued.max(1) as f64,
+            ms(s.produce_max),
+        );
+        stream.stats_since = Instant::now();
     }
 
     /// Queue the next frame if one is due and a buffer is free.
@@ -230,6 +308,7 @@ impl Streamer {
             return Ok(());
         }
         let Some(index) = stream.free.pop() else {
+            stream.stats.starved += 1;
             return Ok(());
         };
 
@@ -245,6 +324,11 @@ impl Streamer {
         }
         buf[..len].copy_from_slice(&frame[..len]);
         self.dev.queue_buffer(index, len)?;
+
+        let produce = now.elapsed();
+        stream.stats.queued += 1;
+        stream.stats.produce_total += produce;
+        stream.stats.produce_max = stream.stats.produce_max.max(produce);
 
         let interval = Duration::from_nanos(u64::from(stream.params.interval) * 100);
         stream.sequence += 1;

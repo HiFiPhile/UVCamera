@@ -6,6 +6,7 @@
 mod doctor;
 mod gadget;
 mod gadget_cli;
+mod irq;
 mod pattern;
 mod stream;
 mod uvc;

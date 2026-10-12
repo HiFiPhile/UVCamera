@@ -47,6 +47,7 @@ const fn iowr<T>(ty: u8, nr: u8) -> c_ulong {
 const V4L2_BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
 const V4L2_MEMORY_MMAP: u32 = 1;
 const V4L2_FIELD_NONE: u32 = 1;
+const V4L2_BUF_FLAG_ERROR: u32 = 0x40;
 const V4L2_EVENT_PRIVATE_START: u32 = 0x0800_0000;
 
 pub const UVC_EVENT_CONNECT: u32 = V4L2_EVENT_PRIVATE_START;
@@ -96,6 +97,26 @@ union FormatUnion {
 struct Format {
     type_: u32,
     fmt: FormatUnion,
+}
+
+#[repr(C)]
+struct OutputParm {
+    capability: u32,
+    outputmode: u32,
+    // struct v4l2_fract timeperframe
+    numerator: u32,
+    denominator: u32,
+    extendedmode: u32,
+    writebuffers: u32,
+    reserved: [u32; 4],
+}
+
+#[repr(C)]
+struct StreamParm {
+    type_: u32,
+    output: OutputParm,
+    // Rest of the 200 byte union.
+    _pad: [u8; 160],
 }
 
 #[repr(C)]
@@ -188,6 +209,7 @@ const _: () = assert!(
 );
 const _: () = assert!(
     size_of::<Capability>() == 104
+        && size_of::<StreamParm>() == 204
         && size_of::<RequestBuffers>() == 20
         && size_of::<EventSubscription>() == 32
         && size_of::<UvcRequestData>() == 64
@@ -199,6 +221,7 @@ const VIDIOC_REQBUFS: c_ulong = iowr::<RequestBuffers>(b'V', 8);
 const VIDIOC_QUERYBUF: c_ulong = iowr::<Buffer>(b'V', 9);
 const VIDIOC_QBUF: c_ulong = iowr::<Buffer>(b'V', 15);
 const VIDIOC_DQBUF: c_ulong = iowr::<Buffer>(b'V', 17);
+const VIDIOC_S_PARM: c_ulong = iowr::<StreamParm>(b'V', 22);
 const VIDIOC_STREAMON: c_ulong = iow::<c_int>(b'V', 18);
 const VIDIOC_STREAMOFF: c_ulong = iow::<c_int>(b'V', 19);
 const VIDIOC_DQEVENT: c_ulong = ior::<RawEvent>(b'V', 89);
@@ -410,6 +433,22 @@ impl VideoDevice {
         unsafe { ioctl(self.fd.as_fd(), VIDIOC_S_FMT, &mut format) }.context("VIDIOC_S_FMT")
     }
 
+    /// Tell the driver the frame interval (100 ns units) so it can spread
+    /// each frame evenly over the isochronous service intervals. Returns
+    /// `false` on kernels without `VIDIOC_S_PARM` support (before 6.13).
+    pub fn set_frame_interval(&self, interval: u32) -> Result<bool> {
+        // SAFETY: Plain-old-data struct.
+        let mut parm: StreamParm = unsafe { std::mem::zeroed() };
+        parm.type_ = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        parm.output.numerator = interval;
+        parm.output.denominator = 10_000_000;
+        match unsafe { ioctl(self.fd.as_fd(), VIDIOC_S_PARM, &mut parm) } {
+            Ok(()) => Ok(true),
+            Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => Ok(false),
+            Err(e) => Err(e).context("VIDIOC_S_PARM"),
+        }
+    }
+
     fn request_buffers_raw(&self, count: u32) -> Result<u32> {
         let mut req = RequestBuffers {
             count,
@@ -498,11 +537,16 @@ impl VideoDevice {
             .with_context(|| format!("VIDIOC_QBUF #{index}"))
     }
 
-    /// Returns `None` when no buffer has completed yet.
-    pub fn dequeue_buffer(&self) -> Result<Option<usize>> {
+    /// Returns the index of a completed buffer and whether the driver
+    /// flagged it as failed (e.g. part of the frame was not transferred), or
+    /// `None` when no buffer has completed yet.
+    pub fn dequeue_buffer(&self) -> Result<Option<(usize, bool)>> {
         let mut buf = Self::new_buffer(0);
         match unsafe { ioctl(self.fd.as_fd(), VIDIOC_DQBUF, &mut buf) } {
-            Ok(()) => Ok(Some(buf.index as usize)),
+            Ok(()) => Ok(Some((
+                buf.index as usize,
+                buf.flags & V4L2_BUF_FLAG_ERROR != 0,
+            ))),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e).context("VIDIOC_DQBUF"),
         }
@@ -539,6 +583,7 @@ mod tests {
         assert_eq!(VIDIOC_QUERYBUF, 0xc058_5609);
         assert_eq!(VIDIOC_QBUF, 0xc058_560f);
         assert_eq!(VIDIOC_DQBUF, 0xc058_5611);
+        assert_eq!(VIDIOC_S_PARM, 0xc0cc_5616);
         assert_eq!(VIDIOC_STREAMON, 0x4004_5612);
         assert_eq!(VIDIOC_STREAMOFF, 0x4004_5613);
         assert_eq!(VIDIOC_DQEVENT, 0x8088_5659);
