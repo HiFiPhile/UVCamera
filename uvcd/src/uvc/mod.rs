@@ -790,4 +790,110 @@ mod tests {
             }
         );
     }
+
+    /// Requests captured from Linux `uvcvideo` (`v4l2-ctl --list-formats-ext`
+    /// then `ffplay` at 1080p60), as (bmRequestType, bRequest, wValue,
+    /// wIndex, wLength). Linux reads the control ranges at probe time, then
+    /// probes every format/frame with SET_CUR, GET_MIN, GET_MAX, SET_CUR,
+    /// GET_CUR before committing.
+    #[test]
+    fn linux_uvcvideo_sequence() {
+        let table = FormatTable::from_specs(&[
+            FormatSpec::default_for(FormatKind::Mjpeg).with_fps(&[60, 30, 15]),
+            FormatSpec::default_for(FormatKind::Yuyv),
+        ])
+        .unwrap();
+        let mut p = Protocol::new(table, EntityIds::default(), PAYLOAD);
+
+        let r = |t, r, v, i, l| CtrlRequest {
+            request_type: t,
+            request: r,
+            value: v,
+            index: i,
+            length: l,
+        };
+        let probe = |format: u8, frame: u8, interval: u32| {
+            StreamingControl {
+                hint: 1,
+                format_index: format,
+                frame_index: frame,
+                frame_interval: interval,
+                ..Default::default()
+            }
+            .to_bytes()
+        };
+
+        // Control initialization.
+        assert_eq!(
+            data(p.handle_setup(&r(161, GET_INFO, 512, 512, 1))),
+            vec![INFO_GET_SET]
+        );
+        assert_eq!(
+            data(p.handle_setup(&r(161, GET_INFO, 512, 256, 1))),
+            vec![INFO_GET_SET]
+        );
+
+        // Initial probe with the default format: 1080p60.
+        let def = StreamingControl::parse(&data(p.handle_setup(&r(161, GET_DEF, 256, 1, 34))));
+        assert_eq!(
+            (def.format_index, def.frame_index, def.frame_interval),
+            (1, 1, 166_666)
+        );
+
+        for (request, value) in [
+            (GET_DEF, 128i16),
+            (GET_MIN, 0),
+            (GET_MAX, 255),
+            (GET_RES, 1),
+        ] {
+            assert_eq!(
+                data(p.handle_setup(&r(161, request, 512, 512, 2))),
+                value.to_le_bytes()
+            );
+        }
+        assert_eq!(
+            data(p.handle_setup(&r(161, GET_DEF, 512, 256, 1))),
+            vec![AE_MODE_AUTO]
+        );
+        assert_eq!(
+            data(p.handle_setup(&r(161, GET_RES, 512, 256, 1))),
+            vec![AE_MODE_AUTO]
+        );
+
+        // Format enumeration: every frame of both formats, including YUYV
+        // 1280x720 at its only rate (10 fps = 1000000).
+        for (format, frame, interval) in [
+            (1, 1, 166_666),
+            (1, 2, 166_666),
+            (1, 3, 166_666),
+            (2, 1, 333_333),
+            (2, 2, 1_000_000),
+        ] {
+            assert_eq!(p.handle_setup(&r(33, SET_CUR, 256, 1, 34)), Reply::Receive);
+            p.handle_data(&probe(format, frame, interval));
+            p.handle_setup(&r(161, GET_MIN, 256, 1, 34));
+            p.handle_setup(&r(161, GET_MAX, 256, 1, 34));
+            p.handle_setup(&r(33, SET_CUR, 256, 1, 34));
+            p.handle_data(&probe(format, frame, interval));
+            let cur = StreamingControl::parse(&data(p.handle_setup(&r(161, GET_CUR, 256, 1, 34))));
+            assert_eq!(
+                (cur.format_index, cur.frame_index, cur.frame_interval),
+                (format, frame, interval)
+            );
+        }
+
+        // Commit MJPEG 1080p60.
+        assert_eq!(p.handle_setup(&r(33, SET_CUR, 512, 1, 34)), Reply::Receive);
+        assert!(p.handle_data(&probe(1, 1, 166_666)));
+        assert_eq!(
+            p.committed(),
+            StreamParams {
+                kind: FormatKind::Mjpeg,
+                width: 1920,
+                height: 1080,
+                interval: 166_666,
+                max_frame_size: 1920 * 1080 * 2,
+            }
+        );
+    }
 }

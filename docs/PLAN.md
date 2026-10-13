@@ -74,9 +74,17 @@ HAL/init interplay and host compatibility.
       hardware or NEON JPEG encoder (Phase 3).
 - [x] Live stats every 5 s: frames sent, frames the kernel flagged as not
       fully transferred, starvation, max completion gap, produce time.
-- [ ] Host test: Linux `ffplay`, macOS
-- [x] Windows request sequence captured as a unit test
-      (`windows_11_camera_app_sequence`); Linux/macOS still to capture
+- [x] Host test: Linux `uvcvideo` (2026-10-13), SuperSpeed. `v4l2-ctl
+      --list-formats-ext` lists everything; `ffplay` shows MJPEG 1080p60 at
+      59.9 fps (3 of 1383 frames failed, ~0.2%), YUYV 640×480@30 at 30.0 fps
+      (6 of 675 failed, ~0.9%, shown by ffmpeg as "dequeued v4l2 buffer
+      contains corrupted data"), and YUYV 1280×720@10. Linux delivers failed
+      frames flagged as errors, whereas Windows silently drops them.
+- [ ] Host test: macOS
+- [x] Host request sequences captured as unit tests:
+      `windows_11_camera_app_sequence`, `linux_uvcvideo_sequence` (Linux
+      probes every format/frame with SET_CUR/GET_MIN/GET_MAX/SET_CUR/GET_CUR).
+      macOS still to capture.
 
 Default formats: MJPEG 1920×1080, 1280×720 and 640×480 at 30/15 fps; YUYV
 640×480 at 30/15 and 1280×720 at 10. The isochronous endpoint defaults to
@@ -107,6 +115,15 @@ Causes:
   uvcd now raises `irq/<n>-<udc driver>` to SCHED_FIFO 50 at stream start
   and restores it at stop (`--no-irq-boost` disables this). The thread is
   recreated, and reset by the vendor driver, on every gadget bind.
+
+Residual failures with the boost: 0% on the Windows PC, ~0.2% (MJPEG
+1080p60) and ~0.9% (YUYV 640×480@30) on the Linux PC. Not CPU idle exit,
+since this phone's idle states wake in ≤ 302 µs. Candidates still to try:
+(1) moving the dwc3 IRQ off the busy CPU0/1 (`/proc/irq/<n>/smp_affinity`);
+(2) the host not polling in time, which dwc3 also reports as a missed
+slot, would explain the Windows/Linux difference; (3) a deeper request
+pool via `streaming_interval` 2 + `maxburst` 1 (same 24.5 MB/s, 6.25 ms
+buffered for 640×480 YUYV).
 
 Rule of thumb: use the smallest `maxburst` that covers the largest advertised
 uncompressed frame rate, because bigger bursts shrink the timing margin on
