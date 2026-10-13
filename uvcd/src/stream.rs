@@ -21,6 +21,7 @@ use crate::{
     irq::IrqBoost,
     pattern::TestPattern,
     source::SourceHub,
+    util::monotonic_us,
     uvc::{Protocol, Reply, StreamParams, format::FormatKind},
     v4l2::{Event, Speed, VideoDevice},
 };
@@ -33,6 +34,10 @@ const STATS_PERIOD: Duration = Duration::from_secs(5);
 /// How long the last app frame is repeated when no new one arrives, before
 /// falling back to the placeholder pattern.
 const REPEAT_LIMIT: Duration = Duration::from_secs(1);
+/// How long after a fresh app frame to wait for the next one, in frame
+/// intervals, before repeating it. Fresh frames are sent as they arrive, so
+/// this only matters when the camera runs slower than the stream.
+const REPEAT_AFTER_INTERVALS: f64 = 1.5;
 
 /// Why [`Streamer::run`] returned.
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +78,13 @@ struct Stats {
     placeholder: u64,
     /// App frames rejected for having the wrong size or format.
     invalid: u64,
+    /// The last app frame sent again because no new one arrived in time.
+    repeated: u64,
+    /// Capture (sensor timestamp) to USB queue, for fresh frames.
+    latency_total: Duration,
+    latency_max: Duration,
+    /// Part of the latency spent waiting in the daemon for a free buffer.
+    wait_total: Duration,
     /// Times a frame was due but every buffer was still owned by the driver.
     starved: u64,
     /// Longest time between two buffer completions.
@@ -83,12 +95,22 @@ struct Stats {
     produce_max: Duration,
 }
 
+struct AppFrame {
+    data: Vec<u8>,
+    /// When the daemon received it.
+    arrived: Instant,
+    /// Capture time from the app (CLOCK_MONOTONIC, µs).
+    pts_us: u64,
+    /// Not yet queued to the driver.
+    unsent: bool,
+}
+
 struct ActiveStream {
     params: StreamParams,
     /// Id announced to the frame source for this stream.
     stream_id: u32,
-    /// Latest valid app frame and when it arrived.
-    last: Option<(Vec<u8>, Instant)>,
+    /// Latest valid app frame.
+    last: Option<AppFrame>,
     /// Placeholder when no app frames are available.
     pattern: TestPattern,
     /// Buffers owned by us (not queued to the driver).
@@ -156,14 +178,23 @@ impl Streamer {
             if self.stream.is_some() {
                 flags |= PollFlags::OUT;
             }
-            let mut fds = [PollFd::new(&self.dev, flags)];
+            let source = self.source.clone();
+            let mut fds = [
+                PollFd::new(&self.dev, flags),
+                PollFd::from_borrowed_fd(source.notify_fd(), PollFlags::IN),
+            ];
+            // Only wake for app frames while streaming.
+            let nfds = if self.stream.is_some() { 2 } else { 1 };
             let timeout = Timespec::try_from(wait).unwrap();
-            match poll(&mut fds, Some(&timeout)) {
+            match poll(&mut fds[..nfds], Some(&timeout)) {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(e).context("poll() failed"),
             }
             let revents = fds[0].revents();
+            if fds[1].revents().contains(PollFlags::IN) {
+                source.clear_notify();
+            }
 
             if revents.intersects(PollFlags::HUP | PollFlags::NVAL) {
                 return Ok(Exit::DeviceGone);
@@ -352,7 +383,11 @@ impl Streamer {
         let source_fps = s.fresh as f64 / elapsed.as_secs_f64();
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         info!(
-            "Stats: sent {fps:.1} fps, app {source_fps:.1} fps, placeholder {}, invalid {}, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
+            "Stats: sent {fps:.1} fps, app {source_fps:.1} fps, latency avg {:.1} ms / max {:.1} ms (daemon wait avg {:.1} ms), repeated {}, placeholder {}, invalid {}, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
+            ms(s.latency_total) / s.fresh.max(1) as f64,
+            ms(s.latency_max),
+            ms(s.wait_total) / s.fresh.max(1) as f64,
+            s.repeated,
             s.placeholder,
             s.invalid,
             s.failed,
@@ -369,11 +404,29 @@ impl Streamer {
         });
     }
 
-    /// Queue the next frame if one is due and a buffer is free.
+    /// Queue the next frame if one is ready and a buffer is free: a fresh app
+    /// frame as soon as it arrives, otherwise, once due, a repeat of the last
+    /// app frame or the placeholder pattern.
     fn feed_frame(&mut self) -> Result<()> {
         let stream = self.stream.as_mut().unwrap();
         let now = Instant::now();
-        if now < stream.next_due {
+
+        if let Some((frame, arrived)) = self.source.take(stream.stream_id) {
+            if frame_is_valid(&stream.params, &frame.data) {
+                stream.stats.fresh += 1;
+                stream.last = Some(AppFrame {
+                    data: frame.data,
+                    arrived,
+                    pts_us: frame.pts_us,
+                    unsent: true,
+                });
+            } else {
+                stream.stats.invalid += 1;
+            }
+        }
+
+        let fresh = stream.last.as_ref().is_some_and(|f| f.unsent);
+        if !fresh && now < stream.next_due {
             return Ok(());
         }
         let Some(index) = stream.free.pop() else {
@@ -381,16 +434,23 @@ impl Streamer {
             return Ok(());
         };
 
-        if let Some((frame, _)) = self.source.take(stream.stream_id) {
-            if frame_is_valid(&stream.params, &frame.data) {
-                stream.stats.fresh += 1;
-                stream.last = Some((frame.data, now));
-            } else {
-                stream.stats.invalid += 1;
+        let frame = match &mut stream.last {
+            Some(f) if f.unsent => {
+                f.unsent = false;
+                let capture_us = monotonic_us().saturating_sub(f.pts_us);
+                // Ignore timestamps from a different clock or the future.
+                if capture_us < 10_000_000 {
+                    let latency = Duration::from_micros(capture_us);
+                    stream.stats.latency_total += latency;
+                    stream.stats.latency_max = stream.stats.latency_max.max(latency);
+                }
+                stream.stats.wait_total += now.duration_since(f.arrived);
+                f.data.as_slice()
             }
-        }
-        let frame = match &stream.last {
-            Some((data, at)) if now.duration_since(*at) < REPEAT_LIMIT => data.as_slice(),
+            Some(f) if now.duration_since(f.arrived) < REPEAT_LIMIT => {
+                stream.stats.repeated += 1;
+                f.data.as_slice()
+            }
             _ => {
                 stream.stats.placeholder += 1;
                 stream.pattern.frame(stream.sequence)?
@@ -415,11 +475,16 @@ impl Streamer {
 
         let interval = Duration::from_nanos(u64::from(stream.params.interval) * 100);
         stream.sequence += 1;
-        stream.next_due += interval;
-        // Don't try to catch up after a stall; resynchronize instead.
-        if stream.next_due + interval < now {
-            stream.dropped += 1;
-            stream.next_due = now + interval;
+        if fresh {
+            // The camera sets the pace; only fill in if it falls behind.
+            stream.next_due = now + interval.mul_f64(REPEAT_AFTER_INTERVALS);
+        } else {
+            stream.next_due += interval;
+            // Don't try to catch up after a stall; resynchronize instead.
+            if stream.next_due + interval < now {
+                stream.dropped += 1;
+                stream.next_due = now + interval;
+            }
         }
 
         Ok(())

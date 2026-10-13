@@ -17,6 +17,7 @@ import android.hardware.camera2.params.SessionConfiguration
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -124,7 +125,10 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
 
         val format = if (mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
         val reader = ImageReader.newInstance(params.width, params.height, format, MAX_IMAGES)
-        reader.setOnImageAvailableListener(FrameEncoder(mode, params, sink), handler)
+        val realtimeTimestamps = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
+            CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+        reader.setOnImageAvailableListener(
+            FrameEncoder(mode, params, realtimeTimestamps, sink), handler)
         this.reader = reader
         active = params
 
@@ -180,9 +184,15 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                     }
                     session = s
 
-                    val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                    // PREVIEW rather than RECORD: it is tuned for latency, and
+                    // video stabilization would buffer several frames.
+                    val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(reader.surface)
                         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                        set(
+                            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                            CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
+                        )
                         set(
                             CaptureRequest.CONTROL_AF_MODE,
                             CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO,
@@ -233,6 +243,8 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
 private class FrameEncoder(
     private val mode: EncodeMode,
     params: StreamParams,
+    /** Image timestamps are in the elapsedRealtime (boot time) clock. */
+    private val realtimeTimestamps: Boolean,
     private val sink: FrameSink,
 ) : ImageReader.OnImageAvailableListener {
     private val width = params.width
@@ -248,8 +260,16 @@ private class FrameEncoder(
 
     override fun onImageAvailable(reader: ImageReader) {
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
-        // Capture time in CLOCK_MONOTONIC, as the protocol expects.
-        val ptsUs = System.nanoTime() / 1000
+        // Capture time in CLOCK_MONOTONIC (System.nanoTime), as the protocol
+        // expects, so the daemon can measure capture-to-USB latency. The
+        // sensor timestamp is the start of exposure; when it's in the boot
+        // time clock, shift it by how long ago it was.
+        val now = System.nanoTime()
+        val ptsUs = if (realtimeTimestamps) {
+            (now - (SystemClock.elapsedRealtimeNanos() - image.timestamp)) / 1000
+        } else {
+            now / 1000
+        }
 
         image.use {
             when (mode) {

@@ -218,10 +218,21 @@ frames; ffplay shows no corrupted-frame warnings.
 **Exit:** 1080p30 MJPEG to Windows, macOS and Linux for 1 hour without leaks.
 Latency is measured with a stopwatch test (target < 150 ms glass-to-glass).
 Screen off works, or the limitation is documented.
-- [x] Linux
-- [ ] Windows, macOS
+- [x] Linux, Windows (Camera app)
+- [ ] macOS
 - [ ] 1 hour soak (memory of app and daemon stable)
-- [ ] Latency
+- [x] Latency (Windows Camera, 1080p30 MJPEG, stopwatch): 250 ms at first,
+      **210 ms** after queueing app frames as they arrive (they used to wait
+      for the next 33 ms tick) and capturing with TEMPLATE_PREVIEW and video
+      stabilization off. The daemon now logs capture-to-USB-queue latency
+      from the sensor timestamp: **104 ms** (131 ms after AE lengthened the
+      exposure, presumably; the timestamp is the start of exposure), of which
+      0.1 ms is waiting in the daemon. The remaining ~80–105 ms is USB
+      transfer plus Windows' decode, buffering and display. The camera
+      pipeline dominates, so the 150 ms target isn't reachable from our
+      side; 210 ms is typical for a USB webcam with Windows Camera.
+      Follow-ups in Phase 4: compare the YUV path at 1080p with hardware
+      JPEG; log exposure time next to latency.
 - [x] Screen off (Android 16, OnePlus 15): video keeps going. The camera
       dipped to 26.6 fps in the 5 s window where the screen turned off, then
       held 29.4–30 fps with no placeholder or failed frames. The foreground

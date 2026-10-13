@@ -21,6 +21,7 @@ use crate::{
     gadget_cli::{StreamOpts, build_specs},
     message::{self, EnableRequest, Frame, Request, Response, SourceEvent},
     pattern::TestPattern,
+    util::monotonic_us,
     uvc::{StreamParams, format::FormatKind},
 };
 
@@ -55,17 +56,6 @@ impl Client {
             .context("Failed to send request")?;
         Response::read_from(&mut self.stream).context("Failed to receive response")
     }
-}
-
-/// CLOCK_MONOTONIC in microseconds.
-fn monotonic_us() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: Valid clock id and output pointer.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1000
 }
 
 /// Attach as the frame source and feed a reversed test pattern in whatever

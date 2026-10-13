@@ -16,6 +16,7 @@ mod sepatch;
 mod session;
 mod source;
 mod stream;
+mod util;
 mod uvc;
 mod v4l2;
 

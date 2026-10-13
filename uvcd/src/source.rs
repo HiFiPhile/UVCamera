@@ -11,11 +11,15 @@
 
 use std::{
     io::{self, Write},
-    os::unix::net::UnixStream,
+    os::{
+        fd::{AsFd, BorrowedFd, OwnedFd},
+        unix::net::UnixStream,
+    },
     sync::Mutex,
     time::{Duration, Instant},
 };
 
+use rustix::event::{EventfdFlags, eventfd};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -61,12 +65,34 @@ impl Inner {
     }
 }
 
-#[derive(Default)]
 pub struct SourceHub {
     inner: Mutex<Inner>,
+    /// Signaled whenever a frame for the current stream arrives, so the
+    /// stream thread can queue it right away.
+    notify: OwnedFd,
+}
+
+impl Default for SourceHub {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            notify: eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)
+                .expect("Failed to create eventfd"),
+        }
+    }
 }
 
 impl SourceHub {
+    /// Readable when a new frame may be available; see [`Self::clear_notify`].
+    pub fn notify_fd(&self) -> BorrowedFd<'_> {
+        self.notify.as_fd()
+    }
+
+    /// Reset the notification before taking frames.
+    pub fn clear_notify(&self) {
+        let mut buf = [0u8; 8];
+        let _ = rustix::io::read(&self.notify, &mut buf);
+    }
     /// Make `writer`'s connection the frame source, replacing any previous
     /// one. If the host is already streaming, the new source is told
     /// immediately. Returns an id for [`Self::detach`].
@@ -135,6 +161,7 @@ impl SourceHub {
         match inner.stream {
             Some((stream_id, _)) if stream_id == frame.stream_id => {
                 inner.pending = Some((frame, Instant::now()));
+                let _ = rustix::io::write(&self.notify, &1u64.to_ne_bytes());
             }
             _ => debug!("Dropping frame for stream {}", frame.stream_id),
         }
