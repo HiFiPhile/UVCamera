@@ -187,22 +187,42 @@ Pitfalls found:
 - On this phone `adb shell` is root (KernelSU), i.e. a root client; use
   `su 2000` to test unprivileged rejection.
 
-## Phase 3: camera to host (MJPEG)
+## Phase 3: camera to host
 
-1. `WebcamService` FGS (`camera` type, notification with Stop action).
-   Start it from the UI only.
-2. `FormatSpec` from camera capabilities, with user choice of camera and
-   resolution caps. Persist it in preferences.
-3. Encoder strategy A: Camera2 JPEG repeating request where supported.
-   Strategy B: `YUV_420_888` → libjpeg-turbo via JNI (CMake in
-   `app/src/main/cpp`, libjpeg-turbo as a pinned submodule).
-4. Frames over the socket. Newest-wins backpressure. PTS and frame-drop
-   counters in Status.
-5. Placeholder frame when the camera is unavailable or the app disconnects.
+- [x] Protocol v2 source channel (`AttachSource`; StreamStart/StreamStop
+      with per-stream ids; Frame), `source.rs` hub (newest wins, stale ids
+      dropped, write timeout), placeholder pattern when there is no fresh
+      app frame for 1 s. `uvcd client source` feeds a reversed pattern for
+      testing without the app.
+- [x] `WebcamService`: foreground service of type camera, started from the
+      UI (camera permission; notification with a Turn off action). Enables
+      the daemon with formats derived from the back camera's capabilities
+      (`webcamFormats`), attaches as the source, opens the camera only
+      between StreamStart and StreamStop, reconnects if the daemon restarts
+      without re-enabling (which would re-enumerate).
+- [x] `CameraStreamer` (Camera2, one ImageReader output, TEMPLATE_RECORD,
+      AE target range pinned to the fps, continuous-video AF) with
+      per-stream encoders: hardware JPEG where the camera supports the size
+      at the rate, else YUV → `YuvImage` JPEG; YUV → YUYV for uncompressed.
+      `FrameSender` keeps one pending frame (newest wins).
+- [ ] Camera choice (front/back) and resolution caps in the UI; persist.
+- [ ] libjpeg-turbo (NEON) if `YuvImage` can't keep up at some size; not
+      needed so far.
+
+Verified on the OnePlus 15 with the Linux host (2026-10-13): MJPEG
+1920×1080@30 (hardware JPEG), MJPEG 1280×720@30 (YuvImage), YUYV
+640×480@30 all show live video. Daemon stats: 30.0 fps sent, 30.0 fps from
+the camera after ~0.5 s of placeholder while the camera opens, 0 failed
+frames; ffplay shows no corrupted-frame warnings.
 
 **Exit:** 1080p30 MJPEG to Windows, macOS and Linux for 1 hour without leaks.
 Latency is measured with a stopwatch test (target < 150 ms glass-to-glass).
 Screen off works, or the limitation is documented.
+- [x] Linux
+- [ ] Windows, macOS
+- [ ] 1 hour soak (memory of app and daemon stable)
+- [ ] Latency
+- [ ] Screen off / app in background
 
 ## Phase 4: quality and robustness
 

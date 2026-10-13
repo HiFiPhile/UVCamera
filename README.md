@@ -10,10 +10,10 @@ gadget. The app captures from the camera with Camera2 and streams frames to the
 daemon. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** early development (Phase 2). The module runs `uvcd` as a daemon
-in its own SELinux domain; the app enables the webcam and the host sees a test
-pattern. The camera path comes in Phase 3. `uvcd gadget up` still works for
-bring-up without the app.
+**Status:** early development (Phase 3). Enable the webcam in the app and the
+host sees the back camera as MJPEG (up to 1080p30) or YUYV. The camera is on
+only while an app on the host is using it. `uvcd gadget up` still works for
+bring-up with a test pattern and no app.
 
 ## Requirements
 

@@ -6,18 +6,24 @@
     <string name="webcam_connecting">Connecting to uvcd…</string>
     <string name="webcam_unavailable">The webcam service isn\'t available. Check that the UVCamera module is installed and enabled.</string>
     <string name="webcam_disabled">Disabled</string>
-    <string name="webcam_source_test_pattern">Enabled. The host sees a test pattern.</string>
+    <string name="webcam_source_test_pattern">Enabled without the camera. The host sees a test pattern.</string>
+    <string name="webcam_source_camera">Enabled with camera %1$s</string>
     <string name="webcam_host_waiting">Waiting for a USB host</string>
     <string name="webcam_host_connected">Connected to a host over %1$s</string>
     <string name="webcam_idle">No app on the host is using the camera</string>
-    <string name="webcam_streaming">Streaming %1$s %2$d×%3$d at %4$s fps</string>
+    <string name="webcam_streaming">Streaming %1$s</string>
     <plurals name="webcam_stats">
         <item quantity="one">Last 5 s: %1$s fps sent, %2$s fps from camera, %3$d frame dropped</item>
         <item quantity="other">Last 5 s: %1$s fps sent, %2$s fps from camera, %3$d frames dropped</item>
     </plurals>
-    <string name="webcam_action_failed">Failed: %1$s</string>
+    <string name="webcam_error">Error: %1$s</string>
+    <string name="webcam_camera_permission">The camera permission is needed to use the phone as a webcam.</string>
     <string name="webcam_enable">Enable</string>
     <string name="webcam_disable">Disable</string>
+    <string name="notification_channel_webcam">Webcam</string>
+    <string name="notification_title">USB webcam is on</string>
+    <string name="notification_text">The camera turns on when an app on the host uses it.</string>
+    <string name="notification_stop">Turn off</string>
     <string name="cameras_title">UVCamera</string>
     <string name="cameras_heading">Camera capabilities</string>
     <string name="cameras_subtitle">Sizes each camera can stream at 30 fps or faster. These are the candidates to advertise to the USB host.</string>

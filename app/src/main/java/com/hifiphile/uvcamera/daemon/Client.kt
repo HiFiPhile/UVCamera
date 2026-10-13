@@ -64,4 +64,38 @@ class Client : Closeable {
         expectOk(request(Request.Enable(maxburst, formats)))
 
     fun disable() = expectOk(request(Request.Disable))
+
+    /**
+     * Turn this connection into the frame source channel. The client must not
+     * be used afterwards; close the returned channel instead.
+     */
+    fun attachSource(): SourceChannel {
+        expectOk(request(Request.AttachSource))
+        return SourceChannel(socket, reader, writer)
+    }
+}
+
+/**
+ * The frame source side of a connection: blocking [readEvent] on one thread,
+ * [sendFrame] from another. Closing it unblocks a pending [readEvent].
+ */
+class SourceChannel internal constructor(
+    private val socket: LocalSocket,
+    private val reader: Reader,
+    private val writer: Writer,
+) : Closeable {
+    fun readEvent(): SourceEvent = SourceEvent.read(reader)
+
+    @Synchronized
+    fun sendFrame(streamId: Int, ptsUs: Long, data: ByteArray, length: Int) {
+        writer.frame(streamId, ptsUs, data, 0, length)
+        writer.flush()
+    }
+
+    override fun close() {
+        // shutdownInput() wakes a reader blocked in another thread.
+        runCatching { socket.shutdownInput() }
+        runCatching { socket.shutdownOutput() }
+        socket.close()
+    }
 }
