@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 HiFiPhile
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Daemon protocol, version 1. Mirrored by the app's `daemon/Message.kt`.
+//! Daemon protocol, version 2. Mirrored by the app's `daemon/Message.kt`.
 //!
 //! After connecting, the client sends the protocol version (u8) and the
 //! daemon answers 1 (accepted) or 0. Then the client sends requests and
@@ -12,16 +12,29 @@
 //! Request  := 1 GetStatus
 //!           | 2 Enable  maxburst:u8 count:u8 FormatSpec*
 //!           | 3 Disable
+//!           | 4 AttachSource
 //! FormatSpec := kind:u8 count:u8 (width:u16 height:u16 count:u8 interval:u32*)*
 //! Response := 0 Error   message:string
 //!           | 1 Status  enabled:u8 speed:u8 streaming:u8 [StreamParams]
-//!                       fps_milli:u32 failed:u32
+//!                       fps_milli:u32 source_fps_milli:u32 failed:u32
 //!           | 2 Ok
 //! StreamParams := kind:u8 width:u16 height:u16 interval:u32 max_frame_size:u32
 //! ```
 //!
 //! `kind` is 0 for MJPEG and 1 for YUYV. `speed` is the kernel's
 //! `enum usb_device_speed`, or 0 when no host has configured the function.
+//!
+//! After `AttachSource` is answered with `Ok`, the connection becomes the
+//! frame source channel and carries no more requests:
+//!
+//! ```text
+//! daemon -> app := 1 StreamStart stream_id:u32 StreamParams
+//!                | 2 StreamStop  stream_id:u32
+//! app -> daemon := 1 Frame stream_id:u32 pts_us:u64 len:u32 data[len]
+//! ```
+//!
+//! The app produces frames in the format of the latest `StreamStart` and
+//! tags them with its `stream_id`; frames for any other id are dropped.
 
 use std::io::{self, Read, Write};
 
@@ -36,13 +49,15 @@ use crate::{
     v4l2::Speed,
 };
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 /// Abstract Unix socket name.
 pub const SOCKET_NAME: &str = "uvcamerad";
 
 const MAX_FORMATS: usize = 2;
 const MAX_FRAMES: usize = 32;
 const MAX_INTERVALS: usize = 16;
+/// Upper bound on one frame from the app, well above 1080p YUYV (4 MB).
+pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
 fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -150,6 +165,32 @@ fn write_format_spec(w: &mut impl Write, spec: &FormatSpec) -> io::Result<()> {
     Ok(())
 }
 
+fn read_stream_params(r: &mut impl Read) -> io::Result<StreamParams> {
+    Ok(StreamParams {
+        kind: read_kind(r)?,
+        width: r.read_u16::<LittleEndian>()?,
+        height: r.read_u16::<LittleEndian>()?,
+        interval: r.read_u32::<LittleEndian>()?,
+        max_frame_size: r.read_u32::<LittleEndian>()?,
+    })
+}
+
+fn write_stream_params(w: &mut impl Write, p: &StreamParams) -> io::Result<()> {
+    write_kind(w, p.kind)?;
+    w.write_u16::<LittleEndian>(p.width)?;
+    w.write_u16::<LittleEndian>(p.height)?;
+    w.write_u32::<LittleEndian>(p.interval)?;
+    w.write_u32::<LittleEndian>(p.max_frame_size)
+}
+
+fn read_fps(r: &mut impl Read) -> io::Result<f64> {
+    Ok(f64::from(r.read_u32::<LittleEndian>()?) / 1000.0)
+}
+
+fn write_fps(w: &mut impl Write, fps: f64) -> io::Result<()> {
+    w.write_u32::<LittleEndian>((fps * 1000.0).round() as u32)
+}
+
 fn speed_to_u8(speed: Option<Speed>) -> u8 {
     match speed {
         None | Some(Speed::Unknown) => 0,
@@ -173,6 +214,8 @@ pub enum Request {
     GetStatus,
     Enable(EnableRequest),
     Disable,
+    /// Turn this connection into the frame source channel.
+    AttachSource,
 }
 
 impl Request {
@@ -196,6 +239,7 @@ impl Request {
                 Ok(Self::Enable(EnableRequest { maxburst, formats }))
             }
             3 => Ok(Self::Disable),
+            4 => Ok(Self::AttachSource),
             id => Err(invalid(format!("Unknown request: {id}"))),
         }
     }
@@ -210,6 +254,7 @@ impl Request {
                 e.formats.iter().try_for_each(|f| write_format_spec(w, f))
             }
             Self::Disable => w.write_u8(3),
+            Self::AttachSource => w.write_u8(4),
         }
     }
 }
@@ -239,17 +284,12 @@ impl Response {
                     s => Some(Speed::from(u32::from(s))),
                 };
                 let streaming = if read_bool(r)? {
-                    Some(StreamParams {
-                        kind: read_kind(r)?,
-                        width: r.read_u16::<LittleEndian>()?,
-                        height: r.read_u16::<LittleEndian>()?,
-                        interval: r.read_u32::<LittleEndian>()?,
-                        max_frame_size: r.read_u32::<LittleEndian>()?,
-                    })
+                    Some(read_stream_params(r)?)
                 } else {
                     None
                 };
-                let fps = f64::from(r.read_u32::<LittleEndian>()?) / 1000.0;
+                let fps = read_fps(r)?;
+                let source_fps = read_fps(r)?;
                 let failed = u64::from(r.read_u32::<LittleEndian>()?);
                 Ok(Self::Status(Status {
                     enabled,
@@ -257,6 +297,7 @@ impl Response {
                         host_speed,
                         streaming,
                         fps,
+                        source_fps,
                         failed,
                     },
                 }))
@@ -284,19 +325,100 @@ impl Response {
                 match &s.stream.streaming {
                     Some(p) => {
                         w.write_u8(1)?;
-                        write_kind(w, p.kind)?;
-                        w.write_u16::<LittleEndian>(p.width)?;
-                        w.write_u16::<LittleEndian>(p.height)?;
-                        w.write_u32::<LittleEndian>(p.interval)?;
-                        w.write_u32::<LittleEndian>(p.max_frame_size)?;
+                        write_stream_params(w, p)?;
                     }
                     None => w.write_u8(0)?,
                 }
-                w.write_u32::<LittleEndian>((s.stream.fps * 1000.0).round() as u32)?;
+                write_fps(w, s.stream.fps)?;
+                write_fps(w, s.stream.source_fps)?;
                 w.write_u32::<LittleEndian>(s.stream.failed.min(u32::MAX.into()) as u32)
             }
             Self::Ok => w.write_u8(2),
         }
+    }
+}
+
+/// Daemon-to-app message on the source channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceEvent {
+    /// Start producing frames in this format.
+    StreamStart {
+        stream_id: u32,
+        params: StreamParams,
+    },
+    /// The host stopped streaming; release the camera.
+    StreamStop { stream_id: u32 },
+}
+
+impl SourceEvent {
+    pub fn read_from(r: &mut impl Read) -> io::Result<Self> {
+        match r.read_u8()? {
+            1 => Ok(Self::StreamStart {
+                stream_id: r.read_u32::<LittleEndian>()?,
+                params: read_stream_params(r)?,
+            }),
+            2 => Ok(Self::StreamStop {
+                stream_id: r.read_u32::<LittleEndian>()?,
+            }),
+            id => Err(invalid(format!("Unknown source event: {id}"))),
+        }
+    }
+
+    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+        match self {
+            Self::StreamStart { stream_id, params } => {
+                w.write_u8(1)?;
+                w.write_u32::<LittleEndian>(*stream_id)?;
+                write_stream_params(w, params)
+            }
+            Self::StreamStop { stream_id } => {
+                w.write_u8(2)?;
+                w.write_u32::<LittleEndian>(*stream_id)
+            }
+        }
+    }
+}
+
+/// App-to-daemon frame on the source channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub stream_id: u32,
+    /// Capture time (CLOCK_MONOTONIC, microseconds) for latency tracking.
+    pub pts_us: u64,
+    pub data: Vec<u8>,
+}
+
+impl Frame {
+    pub fn read_from(r: &mut impl Read) -> io::Result<Self> {
+        match r.read_u8()? {
+            1 => {}
+            id => return Err(invalid(format!("Unknown source message: {id}"))),
+        }
+        let stream_id = r.read_u32::<LittleEndian>()?;
+        let pts_us = r.read_u64::<LittleEndian>()?;
+        let len = r.read_u32::<LittleEndian>()?;
+        if len == 0 || len > MAX_FRAME_LEN {
+            return Err(invalid(format!("Invalid frame length: {len}")));
+        }
+        let mut data = vec![0u8; len as usize];
+        r.read_exact(&mut data)?;
+        Ok(Self {
+            stream_id,
+            pts_us,
+            data,
+        })
+    }
+
+    pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
+        let len = u32::try_from(self.data.len())
+            .ok()
+            .filter(|&l| l > 0 && l <= MAX_FRAME_LEN)
+            .ok_or_else(|| invalid("Invalid frame length"))?;
+        w.write_u8(1)?;
+        w.write_u32::<LittleEndian>(self.stream_id)?;
+        w.write_u64::<LittleEndian>(self.pts_us)?;
+        w.write_u32::<LittleEndian>(len)?;
+        w.write_all(&self.data)
     }
 }
 
@@ -331,7 +453,12 @@ mod tests {
                 FormatSpec::default_for(FormatKind::Yuyv),
             ],
         });
-        for r in [Request::GetStatus, enable, Request::Disable] {
+        for r in [
+            Request::GetStatus,
+            enable,
+            Request::Disable,
+            Request::AttachSource,
+        ] {
             assert_eq!(roundtrip_request(&r), r);
         }
     }
@@ -350,6 +477,7 @@ mod tests {
                     max_frame_size: 614_400,
                 }),
                 fps: 29.958,
+                source_fps: 29.5,
                 failed: 3,
             },
         });
@@ -395,6 +523,7 @@ mod tests {
                     max_frame_size: 614_400,
                 }),
                 fps: 29.958,
+                source_fps: 29.5,
                 failed: 3,
             },
         });
@@ -403,8 +532,55 @@ mod tests {
         #[rustfmt::skip]
         assert_eq!(buf, [
             1, 1, 5, 1, 1, 0x80, 0x02, 0xe0, 0x01, 0x15, 0x16, 0x05, 0x00,
-            0x00, 0x60, 0x09, 0x00, 0x06, 0x75, 0x00, 0x00, 0x03, 0, 0, 0,
+            0x00, 0x60, 0x09, 0x00, 0x06, 0x75, 0x00, 0x00, 0x3c, 0x73, 0x00, 0x00,
+            0x03, 0, 0, 0,
         ]);
+    }
+
+    #[test]
+    fn source_channel_roundtrip_and_golden() {
+        let params = StreamParams {
+            kind: FormatKind::Mjpeg,
+            width: 1920,
+            height: 1080,
+            interval: 333_333,
+            max_frame_size: 4_147_200,
+        };
+        for e in [
+            SourceEvent::StreamStart {
+                stream_id: 7,
+                params,
+            },
+            SourceEvent::StreamStop { stream_id: 7 },
+        ] {
+            let mut buf = vec![];
+            e.write_to(&mut buf).unwrap();
+            assert_eq!(SourceEvent::read_from(&mut buf.as_slice()).unwrap(), e);
+        }
+
+        // Same bytes as the app's MessageTest.kt.
+        let frame = Frame {
+            stream_id: 7,
+            pts_us: 0x0102_0304_0506_0708,
+            data: vec![0xff, 0xd8],
+        };
+        let mut buf = vec![];
+        frame.write_to(&mut buf).unwrap();
+        #[rustfmt::skip]
+        assert_eq!(buf, [
+            1, 7, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 2, 0, 0, 0, 0xff, 0xd8,
+        ]);
+        assert_eq!(Frame::read_from(&mut buf.as_slice()).unwrap(), frame);
+
+        // Zero-length and oversized frames are protocol violations.
+        assert!(
+            Frame::read_from(&mut &[1u8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..])
+                .is_err()
+        );
+        assert!(
+            Frame::read_from(&mut &[1u8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2][..])
+                .is_err()
+        );
     }
 
     #[test]

@@ -20,7 +20,8 @@ use crate::{
     gadget::EndpointConfig,
     irq::IrqBoost,
     pattern::TestPattern,
-    uvc::{Protocol, Reply, StreamParams},
+    source::SourceHub,
+    uvc::{Protocol, Reply, StreamParams, format::FormatKind},
     v4l2::{Event, Speed, VideoDevice},
 };
 
@@ -29,6 +30,9 @@ const BUFFER_COUNT: u32 = 4;
 const MAX_WAIT: Duration = Duration::from_millis(100);
 /// How often streaming statistics are logged.
 const STATS_PERIOD: Duration = Duration::from_secs(5);
+/// How long the last app frame is repeated when no new one arrives, before
+/// falling back to the placeholder pattern.
+const REPEAT_LIMIT: Duration = Duration::from_secs(1);
 
 /// Why [`Streamer::run`] returned.
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +52,8 @@ pub struct StreamStatus {
     pub streaming: Option<StreamParams>,
     /// Frames sent per second over the last statistics window.
     pub fps: f64,
+    /// New frames received from the app per second over the same window.
+    pub source_fps: f64,
     /// Frames not fully transferred over the last statistics window.
     pub failed: u64,
 }
@@ -61,6 +67,12 @@ struct Stats {
     completed: u64,
     /// Completed buffers the driver flagged as not fully transferred.
     failed: u64,
+    /// New frames taken from the app.
+    fresh: u64,
+    /// Frames from the placeholder pattern (no app, or app stalled).
+    placeholder: u64,
+    /// App frames rejected for having the wrong size or format.
+    invalid: u64,
     /// Times a frame was due but every buffer was still owned by the driver.
     starved: u64,
     /// Longest time between two buffer completions.
@@ -73,6 +85,11 @@ struct Stats {
 
 struct ActiveStream {
     params: StreamParams,
+    /// Id announced to the frame source for this stream.
+    stream_id: u32,
+    /// Latest valid app frame and when it arrived.
+    last: Option<(Vec<u8>, Instant)>,
+    /// Placeholder when no app frames are available.
     pattern: TestPattern,
     /// Buffers owned by us (not queued to the driver).
     free: Vec<usize>,
@@ -91,6 +108,7 @@ pub struct Streamer {
     irq_boost: Option<IrqBoost>,
     stream: Option<ActiveStream>,
     status: Arc<Mutex<StreamStatus>>,
+    source: Arc<SourceHub>,
 }
 
 impl Streamer {
@@ -100,6 +118,7 @@ impl Streamer {
         endpoint: EndpointConfig,
         irq_boost: Option<IrqBoost>,
         status: Arc<Mutex<StreamStatus>>,
+        source: Arc<SourceHub>,
     ) -> Self {
         Self {
             dev,
@@ -108,6 +127,7 @@ impl Streamer {
             irq_boost,
             stream: None,
             status,
+            source,
         }
     }
 
@@ -238,9 +258,12 @@ impl Streamer {
         }
         let count = self.dev.allocate_buffers(BUFFER_COUNT)?;
 
+        let stream_id = self.source.stream_started(params);
         let now = Instant::now();
         self.stream = Some(ActiveStream {
             params,
+            stream_id,
+            last: None,
             pattern: TestPattern::new(params.kind, params.width, params.height),
             free: (0..count).collect(),
             next_due: now,
@@ -267,6 +290,7 @@ impl Streamer {
         if let Some(boost) = &mut self.irq_boost {
             boost.restore();
         }
+        self.source.stream_stopped();
 
         self.update_status(|s| {
             s.streaming = None;
@@ -325,9 +349,12 @@ impl Streamer {
         let s = std::mem::take(&mut stream.stats);
         stream.stats_since = Instant::now();
         let fps = s.completed as f64 / elapsed.as_secs_f64();
+        let source_fps = s.fresh as f64 / elapsed.as_secs_f64();
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         info!(
-            "Stats: sent {fps:.1} fps, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
+            "Stats: sent {fps:.1} fps, app {source_fps:.1} fps, placeholder {}, invalid {}, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
+            s.placeholder,
+            s.invalid,
             s.failed,
             s.queued,
             s.starved,
@@ -337,6 +364,7 @@ impl Streamer {
         );
         self.update_status(|status| {
             status.fps = fps;
+            status.source_fps = source_fps;
             status.failed = s.failed;
         });
     }
@@ -353,7 +381,21 @@ impl Streamer {
             return Ok(());
         };
 
-        let frame = stream.pattern.frame(stream.sequence)?;
+        if let Some((frame, _)) = self.source.take(stream.stream_id) {
+            if frame_is_valid(&stream.params, &frame.data) {
+                stream.stats.fresh += 1;
+                stream.last = Some((frame.data, now));
+            } else {
+                stream.stats.invalid += 1;
+            }
+        }
+        let frame = match &stream.last {
+            Some((data, at)) if now.duration_since(*at) < REPEAT_LIMIT => data.as_slice(),
+            _ => {
+                stream.stats.placeholder += 1;
+                stream.pattern.frame(stream.sequence)?
+            }
+        };
         let buf = self.dev.buffer_mut(index);
         let len = frame.len().min(buf.len());
         if len < frame.len() {
@@ -381,5 +423,46 @@ impl Streamer {
         }
 
         Ok(())
+    }
+}
+
+/// Whether an app frame matches the stream's format: YUYV frames are exactly
+/// two bytes per pixel, MJPEG frames start with a JPEG SOI marker and fit
+/// the negotiated maximum.
+fn frame_is_valid(params: &StreamParams, data: &[u8]) -> bool {
+    match params.kind {
+        FormatKind::Yuyv => {
+            data.len() == usize::from(params.width) * usize::from(params.height) * 2
+        }
+        FormatKind::Mjpeg => {
+            data.starts_with(&[0xff, 0xd8]) && data.len() <= params.max_frame_size as usize
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_app_frames() {
+        let yuyv = StreamParams {
+            kind: FormatKind::Yuyv,
+            width: 4,
+            height: 2,
+            interval: 333_333,
+            max_frame_size: 16,
+        };
+        assert!(frame_is_valid(&yuyv, &[0; 16]));
+        assert!(!frame_is_valid(&yuyv, &[0; 15]));
+
+        let mjpeg = StreamParams {
+            kind: FormatKind::Mjpeg,
+            max_frame_size: 4,
+            ..yuyv
+        };
+        assert!(frame_is_valid(&mjpeg, &[0xff, 0xd8, 0, 0]));
+        assert!(!frame_is_valid(&mjpeg, &[0xff, 0xd8, 0, 0, 0]));
+        assert!(!frame_is_valid(&mjpeg, &[0, 0]));
     }
 }

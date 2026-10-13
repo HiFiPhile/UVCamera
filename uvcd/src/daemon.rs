@@ -44,8 +44,9 @@ use tracing::{debug, error, info, info_span, trace, warn};
 use crate::{
     auth::Authenticator,
     gadget::{EndpointConfig, Gadget},
-    message::{self, EnableRequest, Request, Response, Status},
+    message::{self, EnableRequest, Frame, Request, Response, Status},
     session::{Session, SessionConfig, teardown},
+    source::SourceHub,
     stream::StreamStatus,
 };
 
@@ -129,6 +130,9 @@ struct Daemon {
     gadget: Gadget,
     auth: Authenticator,
     session: Mutex<Option<Session>>,
+    /// Outlives sessions, so the app's source connection survives
+    /// disable/enable cycles.
+    source: Arc<SourceHub>,
     udc: Option<String>,
     check_selinux: bool,
 }
@@ -180,6 +184,7 @@ impl Daemon {
                 udc: self.udc.clone(),
                 irq_boost: true,
             },
+            self.source.clone(),
         )?);
         info!("Enabled");
         Ok(())
@@ -196,6 +201,7 @@ impl Daemon {
             Request::GetStatus => return Response::Status(self.status()),
             Request::Enable(r) => self.enable(r),
             Request::Disable => self.disable(),
+            Request::AttachSource => unreachable!("handled in handle_client"),
         };
 
         match result {
@@ -205,6 +211,28 @@ impl Daemon {
                 Response::Error(format!("{e:#}"))
             }
         }
+    }
+
+    /// Read frames from an attached source until it disconnects. The client
+    /// was authorized when it attached; frames are not re-authorized because
+    /// they can only change what the host sees, not the gadget.
+    fn serve_source(&self, stream: UnixStream) -> Result<()> {
+        let writer = stream
+            .try_clone()
+            .context("Failed to clone source socket")?;
+        let id = self.source.attach(writer)?;
+        let mut reader = io::BufReader::with_capacity(256 * 1024, stream);
+
+        let result = loop {
+            match Frame::read_from(&mut reader) {
+                Ok(frame) => self.source.submit(id, frame),
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break Ok(()),
+                Err(e) => break Err(e).context("Failed to receive frame"),
+            }
+        };
+
+        self.source.detach(id);
+        result
     }
 
     fn handle_client(&self, mut stream: UnixStream, uid: Uid) -> Result<()> {
@@ -230,6 +258,11 @@ impl Daemon {
 
             // Revalidate on every request, e.g. after package changes.
             self.auth.authorize(uid)?;
+            if request == Request::AttachSource {
+                Response::Ok.write_to(&mut stream)?;
+                return self.serve_source(stream);
+            }
+
             // The app polls the status every second.
             if request == Request::GetStatus {
                 trace!(?request, "Request");
@@ -278,6 +311,7 @@ pub fn subcommand_daemon(cli: &DaemonCli) -> Result<()> {
         gadget,
         auth,
         session: Mutex::new(None),
+        source: Arc::new(SourceHub::default()),
         udc: cli.udc.clone(),
         check_selinux: !cli.no_selinux_check,
     });

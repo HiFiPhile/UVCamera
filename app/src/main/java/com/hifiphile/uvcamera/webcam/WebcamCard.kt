@@ -116,6 +116,7 @@ private fun StatusRows(status: Status) {
                 R.plurals.webcam_stats,
                 status.failed.toInt(),
                 String.format(Locale.ROOT, "%.1f", status.fps),
+                String.format(Locale.ROOT, "%.1f", status.sourceFps),
                 status.failed,
             ),
             style = MaterialTheme.typography.bodySmall,

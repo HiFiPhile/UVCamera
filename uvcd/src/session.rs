@@ -20,6 +20,7 @@ use tracing::{error, info, warn};
 use crate::{
     gadget::{DEVICE_CLASS_IAD, EndpointConfig, Gadget, resolve_udc},
     irq::IrqBoost,
+    source::SourceHub,
     stream::{Exit, StreamStatus, Streamer},
     uvc::{
         EntityIds, Protocol,
@@ -91,7 +92,7 @@ pub struct Session {
 impl Session {
     /// Add our function to the gadget and start serving the host. The
     /// gadget must not have a leftover function from a previous session.
-    pub fn start(gadget: Gadget, config: SessionConfig) -> Result<Self> {
+    pub fn start(gadget: Gadget, config: SessionConfig, source: Arc<SourceHub>) -> Result<Self> {
         let udc = resolve_udc(&gadget, config.udc.as_deref())?;
         let original = Original {
             udc: udc.clone(),
@@ -126,24 +127,19 @@ impl Session {
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new(StreamStatus::default()));
         let thread = {
-            let gadget = gadget.clone();
-            let stop = stop.clone();
-            let status = status.clone();
-            let irq_udc = config.irq_boost.then_some(udc);
-            let endpoint = config.endpoint;
+            let server = Server {
+                gadget: gadget.clone(),
+                table,
+                entities,
+                endpoint: config.endpoint,
+                irq_udc: config.irq_boost.then_some(udc),
+                stop: stop.clone(),
+                status: status.clone(),
+                source,
+            };
             thread::Builder::new()
                 .name("uvc-stream".into())
-                .spawn(move || {
-                    serve(
-                        &gadget,
-                        &table,
-                        entities,
-                        endpoint,
-                        irq_udc.as_deref(),
-                        &stop,
-                        &status,
-                    )
-                })
+                .spawn(move || server.run())
                 .context("Failed to spawn stream thread")?
         };
 
@@ -203,44 +199,63 @@ impl Drop for Session {
     }
 }
 
-/// Stream thread: open the video node and serve the host, reopening it
-/// whenever the gadget is rebound, until `stop` is set.
-fn serve(
-    gadget: &Gadget,
-    table: &FormatTable,
+/// What the stream thread needs.
+struct Server {
+    gadget: Gadget,
+    table: FormatTable,
     entities: EntityIds,
     endpoint: EndpointConfig,
-    irq_udc: Option<&str>,
-    stop: &AtomicBool,
-    status: &Arc<Mutex<StreamStatus>>,
-) -> Result<()> {
-    while !stop.load(Ordering::Relaxed) {
-        let node = match gadget.wait_for_video_node(NODE_WAIT) {
-            Ok(n) => n,
-            Err(e) => {
-                // Something else (e.g. a USB mode switch) unbound the gadget.
-                // Our function stays linked; wait for a rebind.
-                warn!("{e}; waiting");
-                continue;
+    /// Controller whose IRQ thread to boost, if enabled.
+    irq_udc: Option<String>,
+    stop: Arc<AtomicBool>,
+    status: Arc<Mutex<StreamStatus>>,
+    source: Arc<SourceHub>,
+}
+
+impl Server {
+    /// Open the video node and serve the host, reopening it whenever the
+    /// gadget is rebound, until `stop` is set.
+    fn run(self) -> Result<()> {
+        while !self.stop.load(Ordering::Relaxed) {
+            let node = match self.gadget.wait_for_video_node(NODE_WAIT) {
+                Ok(n) => n,
+                Err(e) => {
+                    // Something else (e.g. a USB mode switch) unbound the
+                    // gadget. Our function stays linked; wait for a rebind.
+                    warn!("{e}; waiting");
+                    continue;
+                }
+            };
+
+            let dev = VideoDevice::open(&node)?;
+            let (driver, card) = dev.query_capability()?;
+            info!("Opened {node:?} ({driver}, {card})");
+            // This activates the function and connects to the host.
+            dev.subscribe_uvc_events()?;
+
+            let protocol = Protocol::new(
+                self.table.clone(),
+                self.entities,
+                self.endpoint.max_payload(Speed::High),
+            );
+            let irq_boost = self.irq_udc.as_deref().map(IrqBoost::new);
+            let exit = Streamer::new(
+                dev,
+                protocol,
+                self.endpoint,
+                irq_boost,
+                self.status.clone(),
+                self.source.clone(),
+            )
+            .run(&self.stop)?;
+            *self.status.lock().unwrap() = StreamStatus::default();
+            match exit {
+                Exit::Stopped => break,
+                Exit::DeviceGone => warn!("Video node went away; reopening"),
             }
-        };
-
-        let dev = VideoDevice::open(&node)?;
-        let (driver, card) = dev.query_capability()?;
-        info!("Opened {node:?} ({driver}, {card})");
-        // This activates the function and connects to the host.
-        dev.subscribe_uvc_events()?;
-
-        let protocol = Protocol::new(table.clone(), entities, endpoint.max_payload(Speed::High));
-        let irq_boost = irq_udc.map(IrqBoost::new);
-        let exit = Streamer::new(dev, protocol, endpoint, irq_boost, status.clone()).run(stop)?;
-        *status.lock().unwrap() = StreamStatus::default();
-        match exit {
-            Exit::Stopped => break,
-            Exit::DeviceGone => warn!("Video node went away; reopening"),
         }
-    }
 
-    info!("Stopping");
-    Ok(())
+        info!("Stopping");
+        Ok(())
+    }
 }

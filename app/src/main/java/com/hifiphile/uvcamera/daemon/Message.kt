@@ -8,10 +8,10 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
-// Daemon protocol, version 1. Mirrors uvcd/src/message.rs, which documents
+// Daemon protocol, version 2. Mirrors uvcd/src/message.rs, which documents
 // the wire format. All integers are little endian.
 
-const val PROTOCOL_VERSION = 1
+const val PROTOCOL_VERSION = 2
 const val SOCKET_NAME = "uvcamerad"
 
 enum class FormatKind(val wire: Int) {
@@ -81,6 +81,8 @@ data class Status(
     val streaming: StreamParams?,
     /** Frames sent per second over the daemon's last statistics window. */
     val fps: Double,
+    /** New frames received from this app per second over the same window. */
+    val sourceFps: Double,
     /** Frames not fully transferred over the last statistics window. */
     val failed: Long,
 )
@@ -113,6 +115,11 @@ sealed interface Request {
     data object Disable : Request {
         override fun write(out: Writer) = out.u8(3)
     }
+
+    /** Turn the connection into the frame source channel. */
+    data object AttachSource : Request {
+        override fun write(out: Writer) = out.u8(4)
+    }
 }
 
 sealed interface Response {
@@ -126,20 +133,11 @@ sealed interface Response {
             1 -> {
                 val enabled = input.bool()
                 val speed = UsbSpeed.fromWire(input.u8())
-                val streaming = if (input.bool()) {
-                    StreamParams(
-                        kind = FormatKind.fromWire(input.u8()),
-                        width = input.u16(),
-                        height = input.u16(),
-                        interval = input.u32().toInt(),
-                        maxFrameSize = input.u32().toInt(),
-                    )
-                } else {
-                    null
-                }
+                val streaming = if (input.bool()) input.streamParams() else null
                 val fps = input.u32() / 1000.0
+                val sourceFps = input.u32() / 1000.0
                 val failed = input.u32()
-                StatusResponse(Status(enabled, speed, streaming, fps, failed))
+                StatusResponse(Status(enabled, speed, streaming, fps, sourceFps, failed))
             }
             2 -> Ok
             else -> throw IOException("Unknown response: $id")
@@ -147,7 +145,42 @@ sealed interface Response {
     }
 }
 
+/** Daemon-to-app message on the source channel. */
+sealed interface SourceEvent {
+    /** Start producing frames in [params], tagged with [streamId]. */
+    data class StreamStart(val streamId: Int, val params: StreamParams) : SourceEvent
+
+    /** The host stopped streaming; release the camera. */
+    data class StreamStop(val streamId: Int) : SourceEvent
+
+    companion object {
+        fun read(input: Reader): SourceEvent = when (val id = input.u8()) {
+            1 -> StreamStart(input.u32().toInt(), input.streamParams())
+            2 -> StreamStop(input.u32().toInt())
+            else -> throw IOException("Unknown source event: $id")
+        }
+    }
+}
+
+/** Write one frame on the source channel. */
+fun Writer.frame(streamId: Int, ptsUs: Long, data: ByteArray, offset: Int = 0, length: Int = data.size) {
+    require(length > 0) { "Empty frame" }
+    u8(1)
+    u32(streamId)
+    u64(ptsUs)
+    u32(length)
+    bytes(data, offset, length)
+}
+
 class Reader(private val input: InputStream) {
+    fun streamParams() = StreamParams(
+        kind = FormatKind.fromWire(u8()),
+        width = u16(),
+        height = u16(),
+        interval = u32().toInt(),
+        maxFrameSize = u32().toInt(),
+    )
+
     fun u8(): Int {
         val b = input.read()
         if (b < 0) {
@@ -197,6 +230,13 @@ class Writer(private val output: OutputStream) {
         u16(value and 0xffff)
         u16(value ushr 16)
     }
+
+    fun u64(value: Long) {
+        u32(value.toInt())
+        u32((value ushr 32).toInt())
+    }
+
+    fun bytes(data: ByteArray, offset: Int, length: Int) = output.write(data, offset, length)
 
     fun flush() = output.flush()
 }

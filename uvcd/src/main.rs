@@ -14,6 +14,7 @@ mod message;
 mod pattern;
 mod sepatch;
 mod session;
+mod source;
 mod stream;
 mod uvc;
 mod v4l2;

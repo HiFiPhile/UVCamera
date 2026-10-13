@@ -12,8 +12,8 @@
     <string name="webcam_idle">No app on the host is using the camera</string>
     <string name="webcam_streaming">Streaming %1$s %2$d×%3$d at %4$s fps</string>
     <plurals name="webcam_stats">
-        <item quantity="one">Last 5 s: %1$s fps sent, %2$d frame dropped</item>
-        <item quantity="other">Last 5 s: %1$s fps sent, %2$d frames dropped</item>
+        <item quantity="one">Last 5 s: %1$s fps sent, %2$s fps from camera, %3$d frame dropped</item>
+        <item quantity="other">Last 5 s: %1$s fps sent, %2$s fps from camera, %3$d frames dropped</item>
     </plurals>
     <string name="webcam_action_failed">Failed: %1$s</string>
     <string name="webcam_enable">Enable</string>

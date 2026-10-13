@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use crate::{
     gadget::{EndpointConfig, Gadget},
     session::{Original, Session, SessionConfig, teardown},
+    source::SourceHub,
     uvc::format::{FormatKind, FormatSpec},
 };
 
@@ -160,6 +161,8 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
             udc: cli.udc.clone(),
             irq_boost: !cli.no_irq_boost,
         },
+        // No app attaches here, so the host always sees the test pattern.
+        Arc::new(SourceHub::default()),
     )?;
 
     let state = State {

@@ -4,7 +4,13 @@
 //! `uvcd client`: talk to a running daemon from a root shell. Root bypasses
 //! the UID authorization; unprivileged shells are rejected.
 
-use std::{io, os::unix::net::UnixStream};
+use std::{
+    io::{self, BufReader},
+    os::unix::net::UnixStream,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use byteorder::{ReadBytesExt, WriteBytesExt};
@@ -13,8 +19,9 @@ use clap::{Parser, Subcommand};
 use crate::{
     daemon::socket_addr,
     gadget_cli::{StreamOpts, build_specs},
-    message::{self, EnableRequest, Request, Response},
-    uvc::format::FormatKind,
+    message::{self, EnableRequest, Frame, Request, Response, SourceEvent},
+    pattern::TestPattern,
+    uvc::{StreamParams, format::FormatKind},
 };
 
 pub struct Client {
@@ -50,6 +57,91 @@ impl Client {
     }
 }
 
+/// CLOCK_MONOTONIC in microseconds.
+fn monotonic_us() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: Valid clock id and output pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1000
+}
+
+/// Attach as the frame source and feed a reversed test pattern in whatever
+/// format the host commits, until the daemon goes away.
+fn run_source(mut client: Client) -> Result<()> {
+    expect_ok(client.request(&Request::AttachSource)?)?;
+    println!("Attached as frame source");
+
+    let mut writer = client.stream;
+    let mut reader = BufReader::new(writer.try_clone()?);
+    let current: Arc<Mutex<Option<(u32, StreamParams)>>> = Arc::default();
+
+    let events = {
+        let current = current.clone();
+        thread::spawn(move || {
+            loop {
+                match SourceEvent::read_from(&mut reader) {
+                    Ok(event) => {
+                        println!("{event:?}");
+                        *current.lock().unwrap() = match event {
+                            SourceEvent::StreamStart { stream_id, params } => {
+                                Some((stream_id, params))
+                            }
+                            SourceEvent::StreamStop { .. } => None,
+                        };
+                    }
+                    Err(e) => {
+                        println!("Source channel closed: {e}");
+                        return;
+                    }
+                }
+            }
+        })
+    };
+
+    let mut pattern: Option<(u32, TestPattern)> = None;
+    let mut sequence = 0;
+    let mut next = Instant::now();
+
+    while !events.is_finished() {
+        let Some((stream_id, params)) = *current.lock().unwrap() else {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+
+        if pattern.as_ref().is_none_or(|(id, _)| *id != stream_id) {
+            pattern = Some((
+                stream_id,
+                TestPattern::new(params.kind, params.width, params.height).reversed(),
+            ));
+            sequence = 0;
+            next = Instant::now();
+        }
+        let (_, p) = pattern.as_mut().unwrap();
+
+        Frame {
+            stream_id,
+            pts_us: monotonic_us(),
+            data: p.frame(sequence)?.to_vec(),
+        }
+        .write_to(&mut writer)
+        .context("Failed to send frame")?;
+        sequence += 1;
+
+        next += Duration::from_nanos(u64::from(params.interval) * 100);
+        let now = Instant::now();
+        if next > now {
+            thread::sleep(next - now);
+        } else {
+            next = now;
+        }
+    }
+
+    Ok(())
+}
+
 fn expect_ok(response: Response) -> Result<()> {
     match response {
         Response::Ok => Ok(()),
@@ -78,8 +170,8 @@ pub fn subcommand_client(cli: &ClientCli) -> Result<()> {
                         };
                         println!("Streaming: {kind} {}x{} @ {fps:.0} fps", p.width, p.height);
                         println!(
-                            "Last 5 s: {:.1} fps sent, {} failed",
-                            s.stream.fps, s.stream.failed
+                            "Last 5 s: {:.1} fps sent, {:.1} fps from the app, {} failed",
+                            s.stream.fps, s.stream.source_fps, s.stream.failed
                         );
                     }
                     None => println!("Streaming: no"),
@@ -95,6 +187,7 @@ pub fn subcommand_client(cli: &ClientCli) -> Result<()> {
             }))?)
         }
         ClientCommand::Disable => expect_ok(client.request(&Request::Disable)?),
+        ClientCommand::Source => run_source(client),
     }
 }
 
@@ -106,6 +199,9 @@ enum ClientCommand {
     Enable(StreamOpts),
     /// Disable the webcam and restore the USB configuration.
     Disable,
+    /// Act as the frame source, feeding a reversed test pattern. For testing
+    /// the source path without the app.
+    Source,
 }
 
 /// Talk to the running daemon.

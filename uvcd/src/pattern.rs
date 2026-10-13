@@ -42,6 +42,9 @@ const DIGITS: [[u8; 5]; 10] = [
 ];
 
 pub struct TestPattern {
+    /// Draw the color bars right to left, to tell an app-fed pattern
+    /// (`uvcd client source`) from the daemon's own placeholder.
+    reversed: bool,
     kind: FormatKind,
     width: usize,
     height: usize,
@@ -53,6 +56,7 @@ pub struct TestPattern {
 impl TestPattern {
     pub fn new(kind: FormatKind, width: u16, height: u16) -> Self {
         Self {
+            reversed: false,
             kind,
             width: width.into(),
             height: height.into(),
@@ -60,6 +64,12 @@ impl TestPattern {
             yuyv: vec![],
             jpeg_cache: vec![None; LOOP_FRAMES],
         }
+    }
+
+    /// Variant with the color bars in reverse order.
+    pub fn reversed(mut self) -> Self {
+        self.reversed = true;
+        self
     }
 
     /// The encoded frame for sequence number `n`.
@@ -107,6 +117,7 @@ impl TestPattern {
         let split = h * 2 / 3;
 
         for (i, color) in BARS.iter().enumerate() {
+            let i = if self.reversed { BARS.len() - 1 - i } else { i };
             let x0 = w * i / BARS.len();
             let x1 = w * (i + 1) / BARS.len();
             self.fill_rect(x0, 0, x1 - x0, split, *color);
