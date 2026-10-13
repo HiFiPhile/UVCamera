@@ -159,8 +159,14 @@ cannot load kernel modules, so this needs a full VM.
       sides. `uvcd client status|enable|disable`.
 - [x] App: `WebcamCard` shows daemon reachability, host link and stream
       stats, with Enable/Disable (test pattern for now).
-- [ ] Module boot path on a real install (flash ZIP, reboot): post-fs-data
-      sepatch, service.sh supervisor start, app install.
+- [x] Module boot path on a real install (2026-10-13, KernelSU with the
+      Hybrid Mount metamodule; `ksud module install`, reboot): post-fs-data
+      `sepatch` exit 0; service.sh installed the app (no copy present),
+      wrote the doctor report and started the supervisor; the daemon ran as
+      `system` in `uvcamera_daemon` with groups 3009 and CHOWN + SYS_NICE;
+      the app enabled and disabled the webcam; 0 denials since boot.
+      Notes: KernelSU blocks installs while a metamodule has pending
+      changes (reboot first); wireless debugging turns off on reboot.
 
 Verified on the OnePlus 15 (2026-10-13), SELinux enforcing, with the policy
 and supervisor started by hand: the daemon runs as `system` in
