@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import com.hifiphile.uvcamera.camera.CameraInfo
 import com.hifiphile.uvcamera.camera.Facing
 import com.hifiphile.uvcamera.camera.queryCameras
+import com.hifiphile.uvcamera.webcam.WebcamCard
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,11 +87,19 @@ private fun CamerasScreen() {
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            item { WebcamCard() }
+
             item {
-                Text(
-                    stringResource(R.string.cameras_subtitle),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        stringResource(R.string.cameras_heading),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        stringResource(R.string.cameras_subtitle),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
             }
 
             cameras.fold(

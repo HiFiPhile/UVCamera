@@ -5,7 +5,10 @@
 //! requests and feeds frames while the host streams.
 
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -34,6 +37,19 @@ pub enum Exit {
     Stopped,
     /// The video node went away (gadget unbound or function removed).
     DeviceGone,
+}
+
+/// What the host is doing, for status reporting.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StreamStatus {
+    /// Link speed while a host has the function configured.
+    pub host_speed: Option<Speed>,
+    /// The stream the host is currently receiving.
+    pub streaming: Option<StreamParams>,
+    /// Frames sent per second over the last statistics window.
+    pub fps: f64,
+    /// Frames not fully transferred over the last statistics window.
+    pub failed: u64,
 }
 
 /// Counters for one [`STATS_PERIOD`] window.
@@ -74,6 +90,7 @@ pub struct Streamer {
     endpoint: EndpointConfig,
     irq_boost: Option<IrqBoost>,
     stream: Option<ActiveStream>,
+    status: Arc<Mutex<StreamStatus>>,
 }
 
 impl Streamer {
@@ -82,6 +99,7 @@ impl Streamer {
         protocol: Protocol,
         endpoint: EndpointConfig,
         irq_boost: Option<IrqBoost>,
+        status: Arc<Mutex<StreamStatus>>,
     ) -> Self {
         Self {
             dev,
@@ -89,7 +107,12 @@ impl Streamer {
             endpoint,
             irq_boost,
             stream: None,
+            status,
         }
+    }
+
+    fn update_status(&self, f: impl FnOnce(&mut StreamStatus)) {
+        f(&mut self.status.lock().unwrap());
     }
 
     pub fn run(&mut self, stop: &AtomicBool) -> Result<Exit> {
@@ -157,12 +180,14 @@ impl Streamer {
                     warn!("Full speed link: only tiny frames will stream");
                 }
                 self.protocol.set_max_payload(payload);
+                self.update_status(|s| s.host_speed = Some(speed));
             }
             Event::Disconnect => {
                 info!("Host disconnected");
                 if self.stream.is_some() {
                     self.stop_stream();
                 }
+                self.update_status(|s| *s = StreamStatus::default());
             }
             Event::Setup(req) => match self.protocol.handle_setup(&req) {
                 Reply::Data(data) => self.dev.send_response(&data, data.len())?,
@@ -226,6 +251,12 @@ impl Streamer {
             stats_since: now,
         });
 
+        self.update_status(|s| {
+            s.streaming = Some(params);
+            s.fps = 0.0;
+            s.failed = 0;
+        });
+
         // Queue the first frame before STREAMON so data flows immediately.
         self.feed_frame()?;
         // This also completes the host's SET_INTERFACE request.
@@ -236,6 +267,12 @@ impl Streamer {
         if let Some(boost) = &mut self.irq_boost {
             boost.restore();
         }
+
+        self.update_status(|s| {
+            s.streaming = None;
+            s.fps = 0.0;
+            s.failed = 0;
+        });
 
         let Some(stream) = self.stream.take() else {
             // Still acknowledge a SET_INTERFACE(0) if the kernel deferred it.
@@ -286,10 +323,11 @@ impl Streamer {
         }
 
         let s = std::mem::take(&mut stream.stats);
+        stream.stats_since = Instant::now();
+        let fps = s.completed as f64 / elapsed.as_secs_f64();
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         info!(
-            "Stats: sent {:.1} fps, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
-            s.completed as f64 / elapsed.as_secs_f64(),
+            "Stats: sent {fps:.1} fps, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
             s.failed,
             s.queued,
             s.starved,
@@ -297,7 +335,10 @@ impl Streamer {
             ms(s.produce_total) / s.queued.max(1) as f64,
             ms(s.produce_max),
         );
-        stream.stats_since = Instant::now();
+        self.update_status(|status| {
+            status.fps = fps;
+            status.failed = s.failed;
+        });
     }
 
     /// Queue the next frame if one is due and a buffer is free.

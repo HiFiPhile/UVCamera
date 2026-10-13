@@ -142,20 +142,44 @@ cannot load kernel modules, so this needs a full VM.
 
 ## Phase 2: daemon, SELinux, auth and app connection
 
-1. `uvcd sepatch`: the `uvcamera_daemon` domain (rules in ARCHITECTURE.md),
-   using the `sepatch` crate. Add `post-fs-data.sh`.
-2. Port `AuthenticatedDaemon.java` → `standalone/AuthSupervisor.java`.
-   Gradle task for `client-cert.sha256` (from MSD).
-3. `uvcd daemon`: privilege drop, `@uvcamerad` listener, protocol v1
-   (`ipc/message.rs`), `uvcd client` debug CLI.
-4. App `daemon/Client.kt` + `Message.kt`. UI shows daemon status and
-   gadget state, with Enable/Disable buttons driving the test pattern
-   through the daemon.
+- [x] `uvcd sepatch`: the `uvcamera_daemon` domain via the `sepatch` crate
+      (`sepatch.rs`); `--permissive` for collecting denials, `--allow-adb`.
+      `post-fs-data.sh` loads it at boot.
+- [x] `standalone/AuthSupervisor.java`, ported from MSD-KSU: a root
+      `app_process` that starts the daemon via `runcon` and answers per-UID
+      authorization over private pipes (package name + signing certificate
+      pin). Gradle `clientCertificate<Variant>` writes `client-cert.sha256`.
+- [x] `uvcd daemon` (`daemon.rs`): root → `system`, keeping CAP_CHOWN,
+      CAP_SYS_NICE and the `readproc` group; SELinux self-check; listener on
+      `@uvcamerad`; every request re-authorized. `session.rs` shares the
+      gadget lifecycle with `gadget up`.
+- [x] Protocol v1 (`message.rs` / `Message.kt`): GetStatus, Enable (full
+      format list + maxburst), Disable; Status includes host speed, the
+      current stream and live fps/failed counts. Golden-byte tests on both
+      sides. `uvcd client status|enable|disable`.
+- [x] App: `WebcamCard` shows daemon reachability, host link and stream
+      stats, with Enable/Disable (test pattern for now).
+- [ ] Module boot path on a real install (flash ZIP, reboot): post-fs-data
+      sepatch, service.sh supervisor start, app install.
 
-**Exit:** with SELinux enforcing, the app enables the gadget and the host
-sees the test pattern. A differently signed app and `adb shell` (uid 2000) are
-rejected. `ps -Z` shows `uvcamera_daemon`. No new denials in `dmesg | grep
-avc`.
+Verified on the OnePlus 15 (2026-10-13), SELinux enforcing, with the policy
+and supervisor started by hand: the daemon runs as `system` in
+`u:r:uvcamera_daemon:s0` (`CapEff 0x800001`, groups `3009`); the app enables
+the gadget and the Linux host streams the test pattern (MJPEG 1080p30, 30.0
+fps, ~0.3% failed frames); the supervisor ALLOWs the app's UID and DENYs
+another package's UID and the same app ID in another user; a uid 2000 shell
+client is rejected at connect; 0 `uvcamera_daemon` denials (on this phone
+denials go to logcat via auditd, not dmesg). MSD's supervisor and daemon ran
+alongside the whole time.
+
+Pitfalls found:
+- Android mounts /proc with `hidepid=invisible,gid=readproc`, so after the
+  privilege drop the IRQ boost silently found no kernel threads and frame
+  loss went back up (~1.5%) until the daemon kept group 3009.
+- The SELinux self-check needs `connect` on the daemon's own socket, so the
+  `connectto` denial (the actual check) is reached silently.
+- On this phone `adb shell` is root (KernelSU), i.e. a root client; use
+  `su 2000` to test unprivileged rejection.
 
 ## Phase 3: camera to host (MJPEG)
 

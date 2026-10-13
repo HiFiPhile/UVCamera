@@ -10,8 +10,10 @@ gadget. The app captures from the camera with Camera2 and streams frames to the
 daemon. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** early development (Phase 1). `uvcd gadget up` streams a test
-pattern to the host, without the app. The camera path comes in Phase 3.
+**Status:** early development (Phase 2). The module runs `uvcd` as a daemon
+in its own SELinux domain; the app enables the webcam and the host sees a test
+pattern. The camera path comes in Phase 3. `uvcd gadget up` still works for
+bring-up without the app.
 
 ## Requirements
 
@@ -54,6 +56,21 @@ Ctrl-C) removes the function and restores the original USB configuration.
 Options: `--format mjpeg|yuyv` (repeatable), `--mjpeg-fps N` (repeatable,
 e.g. `--mjpeg-fps 60 --mjpeg-fps 30`), `--maxburst N` for SuperSpeed,
 `--log-level debug` to log every control request.
+
+## Daemon
+
+The module patches SELinux at boot (`uvcd sepatch`), then starts a root
+supervisor that launches `uvcd daemon` as the `system` user in the
+`uvcamera_daemon` domain. Only the UVCamera app signed with the certificate
+pinned in the module (`client-cert.sha256`) may use it. From a root shell:
+
+```sh
+uvcd client status
+uvcd client enable [--format mjpeg|yuyv] [--mjpeg-fps N] [--maxburst N]
+uvcd client disable
+```
+
+Daemon logs: `adb logcat -s uvcd`.
 
 ## Building
 

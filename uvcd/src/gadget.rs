@@ -67,12 +67,41 @@ fn remove(path: &Path, dir: bool) -> Result<()> {
     }
 }
 
+/// Create a configfs directory. configfs always creates nodes as root:root,
+/// so when running unprivileged (the daemon runs as `system` with
+/// CAP_CHOWN), hand the new directory and everything the kernel populated in
+/// it over to our uid/gid.
 fn mkdir(path: &Path) -> Result<()> {
     match fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("Failed to create {path:?}")),
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("Failed to create {path:?}")),
     }
+
+    let uid = rustix::process::getuid();
+    if !uid.is_root() {
+        chown_recursive(path, uid, rustix::process::getgid())?;
+    }
+    Ok(())
+}
+
+fn chown_recursive(path: &Path, uid: rustix::fs::Uid, gid: rustix::fs::Gid) -> Result<()> {
+    rustix::fs::chownat(
+        rustix::fs::CWD,
+        path,
+        Some(uid),
+        Some(gid),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .with_context(|| format!("Failed to chown {path:?}"))?;
+
+    if path.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+        for entry in fs::read_dir(path).with_context(|| format!("Failed to read {path:?}"))? {
+            let entry = entry.with_context(|| format!("Failed to read {path:?}"))?;
+            chown_recursive(&entry.path(), uid, gid)?;
+        }
+    }
+    Ok(())
 }
 
 fn link(target: &Path, link: &Path) -> Result<()> {
@@ -82,6 +111,7 @@ fn link(target: &Path, link: &Path) -> Result<()> {
 }
 
 /// A configfs gadget such as `/config/usb_gadget/g1`.
+#[derive(Debug, Clone)]
 pub struct Gadget {
     root: PathBuf,
     config: String,

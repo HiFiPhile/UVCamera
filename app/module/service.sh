@@ -50,3 +50,12 @@ fi
 header Device report
 "${uvcd}" doctor --probe-function > "${log_dir}/doctor.log" 2>&1
 echo "uvcd doctor exit status: ${?}"
+
+# The supervisor runs as root, starts uvcd in the uvcamera_daemon SELinux
+# domain, and tells it which client UIDs belong to the UVCamera app signed
+# with the pinned certificate. Daemon logs go to logcat (tag uvcd).
+header Starting daemon
+CLASSPATH="${mod_dir}/UVCamera.apk" /system/bin/app_process / \
+    com.hifiphile.uvcamera.standalone.AuthSupervisor \
+    "${uvcd}" "${mod_dir}/client-cert.sha256" &
+echo "Supervisor pid: ${!}"

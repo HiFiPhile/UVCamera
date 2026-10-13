@@ -3,11 +3,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Based on msd-tool from MSD.
 
+mod auth;
+mod client;
+mod daemon;
 mod doctor;
 mod gadget;
 mod gadget_cli;
 mod irq;
+mod message;
 mod pattern;
+mod sepatch;
+mod session;
 mod stream;
 mod uvc;
 mod v4l2;
@@ -23,8 +29,11 @@ use tracing::{Level, error};
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Client(client::ClientCli),
+    Daemon(daemon::DaemonCli),
     Doctor(doctor::DoctorCli),
     Gadget(gadget_cli::GadgetCli),
+    Sepatch(sepatch::SepatchCli),
 }
 
 #[derive(Debug, Default, Clone, Copy, ValueEnum)]
@@ -93,8 +102,11 @@ fn main() -> ExitCode {
     init_logging(cli.log_target, cli.log_level);
 
     let ret = match cli.command {
+        Command::Client(c) => client::subcommand_client(&c),
+        Command::Daemon(c) => daemon::subcommand_daemon(&c),
         Command::Doctor(c) => doctor::subcommand_doctor(&c),
         Command::Gadget(c) => gadget_cli::subcommand_gadget(&c),
+        Command::Sepatch(c) => sepatch::subcommand_sepatch(&c),
     };
 
     match ret {

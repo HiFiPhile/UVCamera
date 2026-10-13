@@ -17,27 +17,19 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::{
-    gadget::{DEVICE_CLASS_IAD, EndpointConfig, Gadget, resolve_udc},
-    irq::IrqBoost,
-    stream::{Exit, Streamer},
-    uvc::{
-        Protocol,
-        format::{FormatKind, FormatSpec},
-    },
-    v4l2::{Speed, VideoDevice},
+    gadget::{EndpointConfig, Gadget},
+    session::{Original, Session, SessionConfig, teardown},
+    uvc::format::{FormatKind, FormatSpec},
 };
-
-const NODE_WAIT: Duration = Duration::from_secs(5);
 
 /// What `up` changed, so `down` can undo it after a crash.
 #[derive(Debug, PartialEq, Eq)]
 struct State {
     pid: u32,
-    udc: String,
-    device_class: [u8; 3],
+    original: Original,
 }
 
 impl State {
@@ -73,8 +65,7 @@ impl State {
         match (pid, udc, class) {
             (Some(pid), Some(udc), Some(device_class)) => Ok(Self {
                 pid,
-                udc,
-                device_class,
+                original: Original { udc, device_class },
             }),
             _ => bail!("Missing fields"),
         }
@@ -84,40 +75,16 @@ impl State {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("Failed to create {parent:?}"))?;
         }
-        let [a, b, c] = self.device_class;
+        let [a, b, c] = self.original.device_class;
         fs::write(
             path,
             format!(
                 "pid={}\nudc={}\ndevice_class={a:02x},{b:02x},{c:02x}\n",
-                self.pid, self.udc
+                self.pid, self.original.udc
             ),
         )
         .with_context(|| format!("Failed to write {path:?}"))
     }
-}
-
-/// Undo `up`: detach our function from the config, restore the device
-/// class, rebind the controller, then delete the function.
-fn teardown(gadget: &Gadget, state: Option<&State>) -> Result<()> {
-    if gadget.is_linked() {
-        let udc = state.map(|s| s.udc.clone()).or(gadget.udc()?);
-        gadget.set_udc(None)?;
-        gadget.unlink_function()?;
-        if let Some(state) = state {
-            gadget.set_device_class(state.device_class)?;
-        }
-        if let Some(udc) = udc {
-            gadget.set_udc(Some(&udc))?;
-        }
-        info!("Detached UVC function from the gadget");
-    }
-
-    if gadget.function_exists() {
-        gadget.remove_function()?;
-        info!("Removed UVC function");
-    }
-
-    Ok(())
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -146,13 +113,24 @@ fn down(gadget: &Gadget, state_file: &Path) -> Result<()> {
         }
     }
 
-    teardown(gadget, state.as_ref())?;
+    teardown(gadget, state.as_ref().map(|s| &s.original))?;
 
     match fs::remove_file(state_file) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("Failed to remove {state_file:?}")),
     }
+}
+
+/// Format list for `--format` / `--mjpeg-fps`.
+pub fn build_specs(formats: &[FormatKind], mjpeg_fps: &[u32]) -> Vec<FormatSpec> {
+    formats
+        .iter()
+        .map(|&kind| match kind {
+            FormatKind::Mjpeg => FormatSpec::default_for(kind).with_fps(mjpeg_fps),
+            FormatKind::Yuyv => FormatSpec::default_for(kind),
+        })
+        .collect()
 }
 
 fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
@@ -171,77 +149,33 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
             .with_context(|| format!("Failed to register handler for signal {signal}"))?;
     }
 
-    let udc = resolve_udc(gadget, cli.udc.as_deref())?;
+    let session = Session::start(
+        gadget.clone(),
+        SessionConfig {
+            specs: build_specs(&cli.stream.formats, &cli.stream.mjpeg_fps),
+            endpoint: EndpointConfig {
+                maxpacket: cli.maxpacket,
+                maxburst: cli.stream.maxburst,
+            },
+            udc: cli.udc.clone(),
+            irq_boost: !cli.no_irq_boost,
+        },
+    )?;
+
     let state = State {
         pid: std::process::id(),
-        udc: udc.clone(),
-        device_class: gadget.device_class()?,
+        original: session.original().clone(),
     };
-    let endpoint = EndpointConfig {
-        maxpacket: cli.maxpacket,
-        maxburst: cli.maxburst,
-    };
-    let specs = cli
-        .formats
-        .iter()
-        .map(|&kind| match kind {
-            FormatKind::Mjpeg => FormatSpec::default_for(kind).with_fps(&cli.mjpeg_fps),
-            FormatKind::Yuyv => FormatSpec::default_for(kind),
-        })
-        .collect::<Vec<_>>();
-
-    state.save(state_file)?;
-
-    let result = (|| {
-        let (table, entities) = gadget.create_function(&specs, &endpoint)?;
-        info!("Created UVC function: {table:?}");
-
-        // The UDC must be unbound to change the config. This briefly
-        // disconnects every USB function, including ADB over USB.
-        gadget.set_udc(None)?;
-        gadget.link_function()?;
-        gadget.set_device_class(DEVICE_CLASS_IAD)?;
-        gadget.set_udc(Some(&udc))?;
-        info!("Bound gadget to {udc}");
-
-        while !stop.load(Ordering::Relaxed) {
-            let node = match gadget.wait_for_video_node(NODE_WAIT) {
-                Ok(n) => n,
-                Err(e) => {
-                    // Something else (e.g. a USB mode switch) unbound the
-                    // gadget. Our function stays linked; wait for a rebind.
-                    warn!("{e}; waiting");
-                    continue;
-                }
-            };
-
-            let dev = VideoDevice::open(&node)?;
-            let (driver, card) = dev.query_capability()?;
-            info!("Opened {node:?} ({driver}, {card})");
-            // This activates the function and connects to the host.
-            dev.subscribe_uvc_events()?;
-
-            let protocol =
-                Protocol::new(table.clone(), entities, endpoint.max_payload(Speed::High));
-            let irq_boost = (!cli.no_irq_boost).then(|| IrqBoost::new(&udc));
-            match Streamer::new(dev, protocol, endpoint, irq_boost).run(&stop)? {
-                Exit::Stopped => break,
-                Exit::DeviceGone => warn!("Video node went away; reopening"),
-            }
-        }
-
-        info!("Stopping");
-        Ok(())
-    })();
-
-    if let Err(e) = &result {
-        error!("{e:?}");
+    if let Err(e) = state.save(state_file) {
+        warn!("{e:?}");
     }
 
-    // Always restore the original USB configuration.
-    teardown(gadget, Some(&state))?;
-    let _ = fs::remove_file(state_file);
+    while !stop.load(Ordering::Relaxed) && !session.is_finished() {
+        thread::sleep(Duration::from_millis(100));
+    }
 
+    let result = session.stop();
+    let _ = fs::remove_file(state_file);
     result
 }
 
@@ -279,11 +213,12 @@ struct CommonOpts {
     state_file: PathBuf,
 }
 
-#[derive(Debug, Parser)]
-struct UpCli {
+/// What to advertise to the host. Shared with `uvcd client enable`.
+#[derive(Debug, Args)]
+pub struct StreamOpts {
     /// Formats to advertise, in order of preference.
     #[arg(long = "format", value_name = "FORMAT", default_values = ["mjpeg", "yuyv"])]
-    formats: Vec<FormatKind>,
+    pub formats: Vec<FormatKind>,
 
     /// Frame rates offered for every MJPEG frame size. The highest is the
     /// default.
@@ -293,7 +228,17 @@ struct UpCli {
         default_values_t = [30, 15],
         value_parser = clap::value_parser!(u32).range(1..=120)
     )]
-    mjpeg_fps: Vec<u32>,
+    pub mjpeg_fps: Vec<u32>,
+
+    /// Isochronous max burst for SuperSpeed (0-15).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=15))]
+    pub maxburst: u32,
+}
+
+#[derive(Debug, Parser)]
+struct UpCli {
+    #[command(flatten)]
+    stream: StreamOpts,
 
     /// USB device controller to bind (default: the gadget's current one).
     #[arg(long, value_name = "NAME")]
@@ -302,10 +247,6 @@ struct UpCli {
     /// Isochronous max packet size (1-3072).
     #[arg(long, default_value_t = 3072, value_parser = clap::value_parser!(u32).range(1..=3072))]
     maxpacket: u32,
-
-    /// Isochronous max burst for SuperSpeed (0-15).
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=15))]
-    maxburst: u32,
 
     /// Don't raise the USB controller's IRQ thread to real-time priority
     /// while streaming.
@@ -341,8 +282,10 @@ mod tests {
         let path = dir.join("gadget.state");
         let state = State {
             pid: 1234,
-            udc: "a600000.dwc3".into(),
-            device_class: [0xef, 0x02, 0x01],
+            original: Original {
+                udc: "a600000.dwc3".into(),
+                device_class: [0xef, 0x02, 0x01],
+            },
         };
         state.save(&path).unwrap();
         assert_eq!(State::load(&path).unwrap(), Some(state));

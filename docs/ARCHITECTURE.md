@@ -109,8 +109,10 @@ A single static binary per ABI with subcommands:
 Process model (Phase 2+, from MSD): `service.sh` → `app_process` runs
 `standalone.AuthSupervisor` as root. The supervisor spawns
 `runcon u:r:uvcamera_daemon:s0 uvcd daemon` with its stdin/stdout as a private
-auth pipe. The daemon drops to `system:system`, keeping only `CAP_CHOWN`.
-configfs creates new nodes as `root:root`, so it must `chown` them. It listens
+auth pipe. The daemon drops to `system:system`, keeping only `CAP_CHOWN`
+(configfs creates new nodes as `root:root`, so it must `chown` them),
+`CAP_SYS_NICE` (USB IRQ thread priority) and the `readproc` group (to see
+kernel threads through `/proc`'s `hidepid`). It listens
 on `@uvcamerad` and asks the supervisor to authorize every peer UID, per
 request.
 

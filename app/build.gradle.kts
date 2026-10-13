@@ -7,6 +7,8 @@ import com.android.build.api.artifact.SingleArtifact
 import com.android.build.api.variant.VariantOutputConfiguration
 import org.gradle.kotlin.dsl.support.uppercaseFirstChar
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.security.KeyStore
+import java.security.MessageDigest
 
 plugins {
     alias(libs.plugins.android.application)
@@ -68,6 +70,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
@@ -160,6 +163,29 @@ androidComponents.onVariants { variant ->
         }
     }
 
+    // SHA-256 of the signing certificate. The module's root supervisor only
+    // lets an app signed with this certificate talk to uvcd.
+    val clientCertificate = tasks.register("clientCertificate$capitalized") {
+        dependsOn("assemble$capitalized")
+        val certificateFile = variantDir.map { it.file("client-cert.sha256") }
+        outputs.file(certificateFile)
+        // Always recheck the signing configuration rather than reusing a stale pin.
+        outputs.upToDateWhen { false }
+        doLast {
+            val signing = android.buildTypes.getByName(variant.name).signingConfig
+                ?: throw GradleException("No signing config for ${variant.name}")
+            val store = KeyStore.getInstance(signing.storeType ?: KeyStore.getDefaultType())
+            signing.storeFile!!.inputStream().use {
+                store.load(it, signing.storePassword!!.toCharArray())
+            }
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(store.getCertificate(signing.keyAlias!!).encoded)
+            certificateFile.get().asFile.writeText(digest.joinToString("") {
+                "%02x".format(it.toInt() and 0xff)
+            } + "\n")
+        }
+    }
+
     tasks.register<Zip>("zip$capitalized") {
         inputs.property("rootProject.name", rootProject.name)
         inputs.property("variant.name", variant.name)
@@ -175,6 +201,7 @@ androidComponents.onVariants { variant ->
         isReproducibleFileOrder = true
 
         from(moduleProp.map { it.outputs })
+        from(clientCertificate.map { it.outputs })
         from(variantApkFiles) {
             rename { "${rootProject.name}.apk" }
         }
@@ -193,6 +220,7 @@ androidComponents.onVariants { variant ->
         }
 
         from(File(moduleDir, "customize.sh"))
+        from(File(moduleDir, "post-fs-data.sh"))
         from(File(moduleDir, "service.sh"))
 
         from(File(rootDir, "LICENSE"))
