@@ -222,7 +222,10 @@ Screen off works, or the limitation is documented.
 - [ ] Windows, macOS
 - [ ] 1 hour soak (memory of app and daemon stable)
 - [ ] Latency
-- [ ] Screen off / app in background
+- [x] Screen off (Android 16, OnePlus 15): video keeps going. The camera
+      dipped to 26.6 fps in the 5 s window where the screen turned off, then
+      held 29.4–30 fps with no placeholder or failed frames. The foreground
+      service started from the UI keeps camera access.
 
 ## Phase 4: quality and robustness
 
