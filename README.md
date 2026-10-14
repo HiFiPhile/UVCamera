@@ -22,6 +22,21 @@ bring-up with a test pattern and no app.
 - UVC gadget support in the kernel:
   `zcat /proc/config.gz | grep CONFIG_USB_CONFIGFS_F_UVC` should be `=y`
 
+## Using it
+
+1. Install the module ZIP with Magisk or KernelSU and reboot. It installs the
+   UVCamera app.
+2. Open UVCamera, pick the camera and the maximum resolution, and tap
+   **Enable** (allow the camera permission). A "USB webcam is on"
+   notification appears.
+3. Plug the phone into the computer and choose "UVCamera" in any camera app.
+   The phone's camera turns on only while the computer is using it.
+
+Mount the phone in landscape with its top to the left; if it's mounted the
+other way round, turn on **Rotate 180°**. The host's brightness control
+adjusts the camera's exposure compensation. Turn the webcam off from the app
+or the notification.
+
 ## Checking a device
 
 Install the module ZIP and reboot. Then read the report:
