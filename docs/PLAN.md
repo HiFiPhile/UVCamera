@@ -231,7 +231,15 @@ Latency is measured with a stopwatch test (target < 150 ms glass-to-glass).
 Screen off works, or the limitation is documented.
 - [x] Linux, Windows (Camera app)
 - [ ] macOS
-- [ ] 1 hour soak (memory of app and daemon stable)
+- [x] Soak, cut short at 18 min (front camera, Rotate 180°, i.e. the
+      software JPEG path on two threads): daemon RSS 25.2 MB, 12 fds, 4
+      threads throughout; app PSS 109–197 MB (GC sawtooth, trending down),
+      fds and threads stable once streaming. No leaks, 0 failed USB frames.
+      But software encode time drifted from ~38 ms to ~48 ms with ~90 ms
+      spikes (likely thermal), causing 1.5% out-of-order drops and, with
+      the 1.5-interval repeat, up to 37 fps sent on a 30 fps stream. Fixed
+      the over-send (repeat after 2 intervals, ≥ 0.5 interval between
+      frames).
 - [x] Latency (Windows Camera, 1080p30 MJPEG, stopwatch): 250 ms at first,
       **210 ms** after queueing app frames as they arrive (they used to wait
       for the next 33 ms tick) and capturing with TEMPLATE_PREVIEW and video
@@ -253,6 +261,17 @@ Screen off works, or the limitation is documented.
 
 ## Phase 4: quality and robustness
 
+Done so far:
+- [x] Host brightness → Camera2 AE exposure compensation (protocol v3
+      `Control` event; linear on each side of 128). Verified with the Win11
+      camera settings slider: each step reaches the camera within ~1 ms.
+- [x] Tried rotated MJPEG via YUV reprocessing (camera's hardware JPEG):
+      not viable on the OnePlus 15, whose reprocessing inputs start at
+      3264×1836 (still-capture only). Kept on branch
+      `experiment/yuv-reprocess` for phones with 1080p reprocess input.
+
+Planned:
+
 - UVC controls mapped to Camera2: zoom (`CONTROL_ZOOM_RATIO`), brightness
   (AE compensation), auto/manual focus, white balance auto, power-line
   frequency (AE antibanding).
@@ -265,8 +284,14 @@ Screen off works, or the limitation is documented.
 
 ## Phase 5: stretch
 
-- H.264 via UVC 1.5 frame-based format, when the kernel exposes
-  `streaming/framebased`. MediaCodec with a Surface input from Camera2.
+- H.264 via UVC 1.5 frame-based format: camera → OpenGL (rotation/mirror)
+  → MediaCodec hardware encoder, zero-copy. **Blocked on the OnePlus 15:**
+  the configfs `streaming/framebased` format landed in Linux 6.13 and
+  this phone runs GKI 6.12 (its UVC function offers only `mjpeg` and
+  `uncompressed`, bcdUVC 0x0110; the vendor init's `streaming/h264/h`
+  link points at nothing). Expected on phones with the next GKI branch
+  (6.18). `uvcd doctor` should report it so the app can offer H.264 only
+  where the kernel supports it.
 - Microphone as UAC2 (`f_uac2`) so the phone is a webcam + mic.
 - Still image capture (method 2).
 
