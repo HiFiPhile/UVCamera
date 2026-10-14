@@ -227,8 +227,13 @@ impl Server {
                 Ok(n) => n,
                 Err(e) => {
                     // Something else (e.g. a USB mode switch) unbound the
-                    // gadget. Our function stays linked; wait for a rebind.
-                    warn!("{e}; waiting");
+                    // gadget. Wait for a rebind, adding our function back
+                    // if the switch dropped it.
+                    match self.gadget.relink_if_dropped() {
+                        Ok(true) => info!("Re-linked UVC function after a USB mode change"),
+                        Ok(false) => warn!("{e}; waiting"),
+                        Err(re) => warn!("{e}; failed to re-link: {re:?}"),
+                    }
                     continue;
                 }
             };

@@ -292,10 +292,14 @@ Done so far:
       camera on the host's stream: ~110 ms, a dozen repeated frames, no
       re-enumeration. A change of formats (resolution cap) re-enables the
       daemon, which the host sees as a replug (~0.4 s to reconnect).
+- [x] USB mode changes: on the OnePlus 15, switching to none/MTP/PTP/RNDIS
+      keeps our link (init only removes `f1`..`f9`); the daemon reopens the
+      video node after each rebind (~0.5 s) and the host reconnects. Where
+      a switch drops every link, the daemon re-links once the gadget is
+      bound again (~5 s; simulated by unlinking and rebinding with MTP).
 
 Planned:
 
-- Re-apply after USB mode changes (inotify on `configs/b.1`, UDC state).
 - memfd ring + `USERPTR`/`DMABUF` if profiling shows copy overhead.
 - In-app preview, per-host quirks, MSD coexistence test.
 - Release signing, `update.json` for module updates, GitHub Actions CI

@@ -191,6 +191,24 @@ impl Gadget {
         self.function_dir().is_dir()
     }
 
+    /// Put our function back into the config after something else rebuilt
+    /// it without us (a USB mode switch that clears every function link).
+    /// Waits for that to finish: only acts once the gadget is bound again.
+    /// Returns whether it re-linked.
+    pub fn relink_if_dropped(&self) -> Result<bool> {
+        if self.is_linked() || !self.function_exists() {
+            return Ok(false);
+        }
+        let Some(udc) = self.udc()? else {
+            return Ok(false);
+        };
+        self.set_udc(None)?;
+        self.link_function()?;
+        self.set_device_class(DEVICE_CLASS_IAD)?;
+        self.set_udc(Some(&udc))?;
+        Ok(true)
+    }
+
     /// Create the UVC function with the given formats. Returns the format
     /// table with kernel-assigned indexes and the VideoControl entity IDs.
     pub fn create_function(
@@ -492,6 +510,35 @@ mod tests {
         };
         assert_eq!(ss.max_payload(Speed::Super), 3072 * 7);
         assert_eq!(ss.max_payload(Speed::High), 3072);
+    }
+
+    #[test]
+    fn relinks_only_after_the_gadget_is_bound_again() {
+        let root = std::env::temp_dir().join(format!("uvcd-gadget-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let gadget_dir = root.join("g1");
+        fs::create_dir_all(gadget_dir.join("configs/b.1")).unwrap();
+        fs::create_dir_all(gadget_dir.join(format!("functions/uvc.{INSTANCE}"))).unwrap();
+        for attr in DEVICE_CLASS_ATTRS {
+            fs::write(gadget_dir.join(attr), "0x00").unwrap();
+        }
+        fs::write(gadget_dir.join("UDC"), "\n").unwrap();
+        let gadget = Gadget::new(&gadget_dir, "b.1").unwrap();
+
+        // Mid-switch: unlinked and unbound. Leave it alone.
+        assert!(!gadget.relink_if_dropped().unwrap());
+        assert!(!gadget.is_linked());
+
+        // The switch finished without us.
+        fs::write(gadget_dir.join("UDC"), "a600000.dwc3\n").unwrap();
+        assert!(gadget.relink_if_dropped().unwrap());
+        assert!(gadget.is_linked());
+        assert_eq!(gadget.device_class().unwrap(), DEVICE_CLASS_IAD);
+        assert_eq!(gadget.udc().unwrap().as_deref(), Some("a600000.dwc3"));
+
+        // Linked: nothing to do.
+        assert!(!gadget.relink_if_dropped().unwrap());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
