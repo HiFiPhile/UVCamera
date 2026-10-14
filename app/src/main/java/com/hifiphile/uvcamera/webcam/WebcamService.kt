@@ -16,10 +16,14 @@ import android.os.IBinder
 import android.util.Log
 import com.hifiphile.uvcamera.MainActivity
 import com.hifiphile.uvcamera.R
+import com.hifiphile.uvcamera.camera.CameraInfo
 import com.hifiphile.uvcamera.camera.CameraStreamer
+import com.hifiphile.uvcamera.camera.FrameSink
 import com.hifiphile.uvcamera.camera.Transform
 import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.Client
+import com.hifiphile.uvcamera.daemon.ControlCaps
+import com.hifiphile.uvcamera.daemon.FormatSpec
 import com.hifiphile.uvcamera.daemon.SourceChannel
 import com.hifiphile.uvcamera.daemon.SourceEvent
 import com.hifiphile.uvcamera.daemon.StreamParams
@@ -27,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.Executors
 
 /** What the webcam service is doing, for the UI. */
 data class WebcamState(
@@ -81,9 +86,33 @@ class WebcamService : Service() {
     @Volatile
     private var streamId = 0
 
-    /** Current rotation/mirroring, kept up to date from the settings. */
+    /** Sends the camera's frames to the daemon, while attached. */
     @Volatile
+    private var sender: FrameSender? = null
+
+    private val sink = FrameSink { data, length, ptsUs -> sender?.offer(streamId, data, length, ptsUs) }
+    private val onCameraError: (String) -> Unit = { error -> _state.update { it.copy(error = error) } }
+
+    /**
+     * The camera feeding the host and its state, guarded by [lock]: the
+     * daemon's events and the user's changes arrive on different threads.
+     */
+    private val lock = Any()
+    private lateinit var camera: CameraInfo
+    private lateinit var streamer: CameraStreamer
     private var transform = Transform()
+
+    /** Formats advertised to the host; changing them re-enumerates. */
+    private var formats = emptyList<FormatSpec>()
+
+    /** The host's current stream, to carry over to another camera. */
+    private var stream: StreamParams? = null
+
+    /** Host control values, to carry over to another camera. */
+    private val hostControls = mutableMapOf<Int, Int>()
+
+    /** Applies camera changes off the main thread. */
+    private val switcher = Executors.newSingleThreadExecutor()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -98,6 +127,7 @@ class WebcamService : Service() {
     override fun onDestroy() {
         stopping = true
         channel?.close()
+        switcher.shutdown()
         _state.value = WebcamState()
         super.onDestroy()
     }
@@ -132,33 +162,45 @@ class WebcamService : Service() {
         stopSelf()
     }
 
+    private fun cameraLabel(camera: CameraInfo) = "${camera.id} (${camera.facing.name.lowercase()})"
+
+    private fun transformFor(camera: CameraInfo, settings: WebcamSettings) = WebcamSettings.transformFor(
+        camera, settings.rotation, settings.mirrorH, settings.mirrorV)
+
     private fun run() {
         val manager = getSystemService(CameraManager::class.java)
         val settings = WebcamSettings(this)
-        val camera = try {
-            WebcamSettings.pickCamera(queryCameras(manager), settings.cameraId)
-                ?: throw IllegalStateException("No cameras found")
+        val cameras = try {
+            queryCameras(manager).ifEmpty { throw IllegalStateException("No cameras found") }
         } catch (e: Exception) {
             Log.e(TAG, "No usable camera", e)
             _state.update { it.copy(error = e.toString()) }
             return
         }
-        val formats = webcamFormats(camera, settings.maxResolution.height)
-        val controls = webcamControls(camera)
-        fun currentTransform() = WebcamSettings.transformFor(
-            camera, settings.rotation, settings.mirrorH, settings.mirrorV)
-        transform = currentTransform()
-        val streamer = CameraStreamer(manager, camera.id)
-        _state.update { it.copy(camera = "${camera.id} (${camera.facing.name.lowercase()})") }
-        Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
-            "$transform), advertising $formats and $controls")
+        // Controls of every camera, so switching cameras keeps them.
+        val controls = webcamControls(cameras)
+        synchronized(lock) {
+            camera = WebcamSettings.pickCamera(cameras, settings.cameraId)!!
+            formats = webcamFormats(camera, settings.maxResolution.height)
+            transform = transformFor(camera, settings)
+            streamer = CameraStreamer(manager, camera.id)
+            Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
+                "$transform), advertising $formats and $controls")
+        }
+        _state.update { it.copy(camera = cameraLabel(camera)) }
 
-        // Rotation and mirroring apply live; the camera and formats don't.
-        val listener = settings.onTransformChanged {
-            transform = currentTransform()
-            Log.i(TAG, "Transform changed: $transform")
+        // Rotation and mirroring apply to the running camera.
+        val transformListener = settings.onTransformChanged {
+            synchronized(lock) {
+                transform = transformFor(camera, settings)
+                Log.i(TAG, "Transform changed: $transform")
+                streamer.setTransform(transform)
+            }
             _state.update { it.copy(error = null) }
-            streamer.setTransform(transform)
+        }
+        // Another camera or resolution cap applies live too.
+        val sourceListener = settings.onSourceChanged {
+            switcher.execute { switchSource(manager, settings, cameras, controls) }
         }
 
         while (!stopping) {
@@ -166,7 +208,7 @@ class WebcamService : Service() {
                 Client().use { client ->
                     // Re-enabling would re-enumerate the device on the host.
                     if (!client.getStatus().enabled) {
-                        client.enable(formats, controls)
+                        client.enable(synchronized(lock) { formats }, controls)
                     }
                 }
                 val client = Client()
@@ -176,7 +218,7 @@ class WebcamService : Service() {
                     client.close()
                     throw e
                 }
-                serve(channel, streamer)
+                serve(channel)
             } catch (e: Exception) {
                 if (stopping) {
                     break
@@ -187,18 +229,65 @@ class WebcamService : Service() {
             }
         }
 
-        settings.removeListener(listener)
-        streamer.release()
+        settings.removeListener(transformListener)
+        settings.removeListener(sourceListener)
+        synchronized(lock) { streamer.release() }
+    }
+
+    /**
+     * Follow the user's camera and resolution choice. Another camera with
+     * the same formats takes over the host's stream directly; different
+     * formats re-enumerate the device with them.
+     */
+    private fun switchSource(
+        manager: CameraManager,
+        settings: WebcamSettings,
+        cameras: List<CameraInfo>,
+        controls: ControlCaps,
+    ) {
+        if (stopping) return
+        val next = WebcamSettings.pickCamera(cameras, settings.cameraId) ?: return
+        val nextFormats = webcamFormats(next, settings.maxResolution.height)
+        val reenumerate = synchronized(lock) {
+            val reenumerate = nextFormats != formats
+            if (next.id != camera.id || reenumerate) {
+                Log.i(TAG, "Switching to camera ${next.id}" + if (reenumerate) " with $nextFormats" else "")
+                streamer.releaseAndWait()
+                camera = next
+                formats = nextFormats
+                transform = transformFor(next, settings)
+                streamer = CameraStreamer(manager, next.id)
+                if (reenumerate) {
+                    // The daemon forgets the host's controls on enable.
+                    hostControls.clear()
+                    stream = null
+                } else {
+                    hostControls.forEach(streamer::setControl)
+                    stream?.let { streamer.start(it, transform, sink, onCameraError) }
+                }
+            }
+            reenumerate
+        }
+        _state.update { it.copy(camera = cameraLabel(next), error = null) }
+
+        if (reenumerate) {
+            try {
+                Client().use { it.enable(nextFormats, controls) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to re-enable with new formats", e)
+                _state.update { it.copy(error = e.message ?: e.toString()) }
+            }
+        }
     }
 
     /** Follow the host's streams until the channel closes. */
-    private fun serve(channel: SourceChannel, streamer: CameraStreamer) {
+    private fun serve(channel: SourceChannel) {
         this.channel = channel
         if (stopping) {
             channel.close()
             return
         }
-        val sender = FrameSender(channel) { channel.close() }
+        sender = FrameSender(channel) { channel.close() }
         _state.update { it.copy(error = null) }
 
         try {
@@ -208,27 +297,35 @@ class WebcamService : Service() {
                         Log.i(TAG, "Host started stream ${event.streamId}: ${event.params}")
                         streamId = event.streamId
                         _state.update { it.copy(streaming = event.params, error = null) }
-                        streamer.start(
-                            event.params,
-                            transform,
-                            { data, length, ptsUs -> sender.offer(streamId, data, length, ptsUs) },
-                            { error -> _state.update { it.copy(error = error) } },
-                        )
+                        synchronized(lock) {
+                            stream = event.params
+                            streamer.start(event.params, transform, sink, onCameraError)
+                        }
                     }
                     is SourceEvent.Control -> {
                         Log.i(TAG, "Host set control ${event.control} to ${event.value}")
-                        streamer.setControl(event.control, event.value)
+                        synchronized(lock) {
+                            hostControls[event.control] = event.value
+                            streamer.setControl(event.control, event.value)
+                        }
                     }
                     is SourceEvent.StreamStop -> {
                         Log.i(TAG, "Host stopped stream ${event.streamId}")
-                        streamer.stop()
+                        synchronized(lock) {
+                            stream = null
+                            streamer.stop()
+                        }
                         _state.update { it.copy(streaming = null) }
                     }
                 }
             }
         } finally {
-            streamer.stop()
-            sender.close()
+            synchronized(lock) {
+                stream = null
+                streamer.stop()
+            }
+            sender?.close()
+            sender = null
             channel.close()
             _state.update { it.copy(streaming = null) }
         }

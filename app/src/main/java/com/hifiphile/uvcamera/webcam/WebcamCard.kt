@@ -108,7 +108,7 @@ fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
                 )
             }
 
-            WebcamSettingsRows(locked = service.running)
+            WebcamSettingsRows(running = service.running)
 
             Row(
                 modifier = Modifier.padding(top = 8.dp),
@@ -152,10 +152,13 @@ private fun facingLabel(facing: Facing) = stringResource(when (facing) {
     Facing.EXTERNAL -> R.string.camera_facing_external
 })
 
-/** Camera and resolution cap. Locked while running: changing them needs re-enumeration. */
+/**
+ * Camera, resolution cap and orientation, all applied live. A change that
+ * alters the advertised formats reconnects the webcam on the host.
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun WebcamSettingsRows(locked: Boolean) {
+private fun WebcamSettingsRows(running: Boolean) {
     val context = LocalContext.current
     val settings = remember { WebcamSettings(context) }
     val cameras = remember {
@@ -183,7 +186,6 @@ private fun WebcamSettingsRows(locked: Boolean) {
                     cameraId = camera.id
                     settings.cameraId = camera.id
                 },
-                enabled = !locked,
                 label = { Text(stringResource(R.string.webcam_camera_chip, camera.id, facingLabel(camera.facing))) },
             )
         }
@@ -201,20 +203,18 @@ private fun WebcamSettingsRows(locked: Boolean) {
                     maxResolution = resolution
                     settings.maxResolution = resolution
                 },
-                enabled = !locked,
                 label = { Text(resolution.label) },
             )
         }
     }
 
-    if (locked) {
+    if (running) {
         Text(
-            stringResource(R.string.webcam_settings_locked),
+            stringResource(R.string.webcam_settings_reconnect),
             style = MaterialTheme.typography.bodySmall,
         )
     }
 
-    // Applied live, so never locked.
     Text(
         stringResource(R.string.webcam_settings_orientation),
         style = MaterialTheme.typography.labelLarge,

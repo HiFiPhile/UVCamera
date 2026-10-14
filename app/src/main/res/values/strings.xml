@@ -20,7 +20,7 @@
     <string name="webcam_camera_permission">The camera permission is needed to use the phone as a webcam.</string>
     <string name="webcam_settings_camera">Camera</string>
     <string name="webcam_settings_max_resolution">Maximum resolution</string>
-    <string name="webcam_settings_locked">Turn the webcam off to change the camera or resolution.</string>
+    <string name="webcam_settings_reconnect">Changing the resolution reconnects the webcam on the computer.</string>
     <string name="webcam_settings_orientation">Orientation</string>
     <string name="webcam_rotation_chip">%1$d°</string>
     <string name="webcam_mirror_h">Mirror ↔</string>

@@ -286,10 +286,15 @@ Done so far:
       Planckian locus) with the last AWB colour matrix, unless the
       calibration whitens each reference illuminant (OnePlus back camera)
       and so can't tell temperatures apart; presets are the last resort.
+- [x] Camera and resolution cap change live. Controls are advertised for
+      every camera together (zoom over all their ranges, clamped per
+      camera), so switching cameras with equal formats just reopens the
+      camera on the host's stream: ~110 ms, a dozen repeated frames, no
+      re-enumeration. A change of formats (resolution cap) re-enables the
+      daemon, which the host sees as a replug (~0.4 s to reconnect).
 
 Planned:
 
-- YUYV format. Hot-switch the camera (front/back) without re-enumeration.
 - Re-apply after USB mode changes (inotify on `configs/b.1`, UDC state).
 - memfd ring + `USERPTR`/`DMABUF` if profiling shows copy overhead.
 - In-app preview, per-host quirks, MSD coexistence test.

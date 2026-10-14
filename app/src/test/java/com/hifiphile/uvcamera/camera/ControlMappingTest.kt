@@ -75,5 +75,11 @@ class ControlMappingTest {
 
         // No presets, but colour gains can be set from the calibration.
         assertEquals(ControlCaps(whiteBalance = true), webcamControls(front.copy(manualWhiteBalance = true)))
+
+        // Switchable cameras advertise the union, zoom over both ranges.
+        val front10x = front.copy(zoomRatioRange = 1f to 10f)
+        assertEquals(ControlCaps(60 to 1000, focus = true, whiteBalance = true, powerLine = true),
+            webcamControls(listOf(front10x, camera.copy(zoomRatioRange = 0.6f to 2f))))
+        assertEquals(ControlCaps(), webcamControls(emptyList()))
     }
 }

@@ -65,11 +65,12 @@ fun interface FrameSink {
  * happens on a dedicated handler thread; the public methods may be called
  * from any thread.
  */
-class CameraStreamer(private val manager: CameraManager, private val cameraId: String) {
+class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
     companion object {
         private const val TAG = "CameraStreamer"
         private const val JPEG_QUALITY = 85
         private const val MAX_IMAGES = 3
+        private const val RELEASE_TIMEOUT_MS = 2000L
 
         /**
          * How to produce [params] with [transform]. The camera's JPEG encoder
@@ -276,13 +277,19 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                 builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio(z, range.lower, range.upper))
             }
         }
+        // The host sees the controls of every camera; skip what this one lacks.
+        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList().orEmpty()
+        val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         if (controls[ControlIds.FOCUS_AUTO] == 0) {
-            val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE,
-                focusDiopters(controls[ControlIds.FOCUS] ?: ControlIds.FOCUS_MAX, minFocus))
+            if (minFocus > 0f && CaptureRequest.CONTROL_AF_MODE_OFF in afModes) {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE,
+                    focusDiopters(controls[ControlIds.FOCUS] ?: ControlIds.FOCUS_MAX, minFocus))
+            }
         } else if (controls.containsKey(ControlIds.FOCUS_AUTO)) {
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            if (CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO in afModes) {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            }
         }
         if (controls[ControlIds.WHITE_BALANCE_AUTO] == 0) {
             val kelvin = controls[ControlIds.WHITE_BALANCE_TEMPERATURE] ?: 5000
@@ -377,6 +384,15 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
             closeCamera()
             thread.quitSafely()
         }
+    }
+
+    /**
+     * [release], and wait for the camera to be closed, so another camera
+     * can be opened: phones may not run two at once.
+     */
+    fun releaseAndWait() {
+        release()
+        thread.join(RELEASE_TIMEOUT_MS)
     }
 
     private fun open(params: StreamParams, transform: Transform, sink: FrameSink, onError: (String) -> Unit) {

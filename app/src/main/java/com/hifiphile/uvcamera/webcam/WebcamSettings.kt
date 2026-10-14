@@ -18,7 +18,7 @@ enum class MaxResolution(val height: Int, val label: String) {
     P480(480, "480p"),
 }
 
-/** User choices for the webcam, applied the next time it's enabled. */
+/** User choices for the webcam, applied live by the running service. */
 class WebcamSettings(context: Context) {
     private val prefs = context.getSharedPreferences("webcam", Context.MODE_PRIVATE)
 
@@ -63,6 +63,15 @@ class WebcamSettings(context: Context) {
         return l
     }
 
+    /** Listen for camera or resolution cap changes. */
+    fun onSourceChanged(listener: () -> Unit): SharedPreferences.OnSharedPreferenceChangeListener {
+        val l = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key in SOURCE_KEYS) listener()
+        }
+        prefs.registerOnSharedPreferenceChangeListener(l)
+        return l
+    }
+
     fun removeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) =
         prefs.unregisterOnSharedPreferenceChangeListener(listener)
 
@@ -80,6 +89,7 @@ class WebcamSettings(context: Context) {
         private const val KEY_MIRROR_H = "mirror_h"
         private const val KEY_MIRROR_V = "mirror_v"
         private val TRANSFORM_KEYS = setOf(KEY_ROTATION, KEY_MIRROR_H, KEY_MIRROR_V)
+        private val SOURCE_KEYS = setOf(KEY_CAMERA_ID, KEY_MAX_RESOLUTION)
 
         /**
          * Clockwise rotation that makes [camera]'s frames upright with the

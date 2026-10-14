@@ -76,3 +76,20 @@ val AWB_PRESET_KELVIN = mapOf(
     CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to 6500,
     CameraMetadata.CONTROL_AWB_MODE_SHADE to 7500,
 )
+
+/**
+ * Controls to advertise when the user may switch between [cameras] while
+ * the host is connected: everything any of them supports, so switching
+ * needs no re-enumeration. Each camera clamps or ignores what it lacks.
+ */
+fun webcamControls(cameras: List<CameraInfo>): ControlCaps =
+    cameras.map(::webcamControls).fold(ControlCaps()) { a, b ->
+        ControlCaps(
+            zoom = listOfNotNull(a.zoom, b.zoom)
+                .reduceOrNull { x, y -> minOf(x.first, y.first) to maxOf(x.second, y.second) },
+            focus = a.focus || b.focus,
+            whiteBalance = a.whiteBalance || b.whiteBalance,
+            powerLine = a.powerLine || b.powerLine,
+        )
+    }
+
