@@ -13,10 +13,15 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.Image
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -189,6 +194,14 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     private var active: Active? = null
     private var requestBuilder: CaptureRequest.Builder? = null
     private val chars by lazy { manager.getCameraCharacteristics(cameraId) }
+    private val colorTemperatureRange by lazy { colorTemperatureRange(chars) }
+    private val calibration by lazy { colorCalibration(chars) }
+
+    /**
+     * The colour correction matrix the camera last chose under AWB, used with
+     * manual white balance gains so colours keep the camera's look.
+     */
+    private var autoColorTransform: ColorSpaceTransform? = null
 
     /**
      * Control values the host set ([ControlIds] to value); kept across camera
@@ -203,8 +216,50 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
             val builder = requestBuilder ?: return@post
             val session = session ?: return@post
             applyControls(builder)
-            session.setSingleRepeatingRequest(builder.build(), executor,
-                object : CameraCaptureSession.CaptureCallback() {})
+            session.setSingleRepeatingRequest(builder.build(), executor, resultLogger)
+        }
+    }
+
+    /**
+     * Logs what the camera actually applied for the host's controls,
+     * whenever it changes, to tell a HAL that ignores a setting from one we
+     * didn't send.
+     */
+    private val resultLogger = object : CameraCaptureSession.CaptureCallback() {
+        private var last = ""
+
+        override fun onCaptureCompleted(
+            s: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult,
+        ) {
+            val awb = result.get(CaptureResult.CONTROL_AWB_MODE)
+            if (awb == CaptureResult.CONTROL_AWB_MODE_AUTO) {
+                result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let { autoColorTransform = it }
+            }
+
+            // Gains under AWB and the focus distance under AF change every
+            // frame; only log them when they are manual.
+            val af = result.get(CaptureResult.CONTROL_AF_MODE)
+            // Under CCT some HALs report a vendor AWB mode rather than OFF.
+            val manualWb = awb != CaptureResult.CONTROL_AWB_MODE_AUTO
+            val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.takeIf { manualWb }
+            val focus = result.get(CaptureResult.LENS_FOCUS_DISTANCE)
+                ?.takeIf { af == CaptureResult.CONTROL_AF_MODE_OFF }
+            val cct = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA && manualWb) {
+                result.get(CaptureResult.COLOR_CORRECTION_COLOR_TEMPERATURE)
+            } else {
+                null
+            }
+            val summary = "awb=$awb" + (cct?.let { " cct=${it}K" } ?: "") +
+                (gains?.let { " gains=%.2f/%.2f/%.2f".format(it.red, it.greenEven, it.blue) } ?: "") +
+                " af=$af" + (focus?.let { " focus=%.2f".format(it) } ?: "") +
+                " zoom=${result.get(CaptureResult.CONTROL_ZOOM_RATIO)}" +
+                " antibanding=${result.get(CaptureResult.CONTROL_AE_ANTIBANDING_MODE)}"
+            if (summary != last) {
+                last = summary
+                Log.i(TAG, "Applied: $summary")
+            }
         }
     }
 
@@ -230,12 +285,36 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
             builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         }
         if (controls[ControlIds.WHITE_BALANCE_AUTO] == 0) {
-            val available = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList().orEmpty()
-            builder.set(CaptureRequest.CONTROL_AWB_MODE, awbPreset(
-                controls[ControlIds.WHITE_BALANCE_TEMPERATURE] ?: 5000, available,
-                AWB_PRESET_KELVIN))
+            val kelvin = controls[ControlIds.WHITE_BALANCE_TEMPERATURE] ?: 5000
+            val calibration = calibration
+            val cctRange = colorTemperatureRange
+            if (cctRange != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                // The camera converts the temperature with its own tuning.
+                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_CCT)
+                builder.set(CaptureRequest.COLOR_CORRECTION_COLOR_TEMPERATURE, cctRange.clamp(kelvin))
+                builder.set(CaptureRequest.COLOR_CORRECTION_COLOR_TINT, 0)
+            } else if (calibration != null) {
+                // Many HALs accept the AWB presets but keep auto gains, so
+                // set the gains for the temperature ourselves.
+                val (r, g, b) = calibration.gains(kelvin.toDouble()).map { it.toFloat() }
+                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                builder.set(CaptureRequest.COLOR_CORRECTION_MODE,
+                    CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+                builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, RggbChannelVector(r, g, g, b))
+                builder.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, autoColorTransform
+                    ?: calibration.colorTransform(kelvin.toDouble()).toColorSpaceTransform())
+                Log.i(TAG, "White balance ${kelvin}K: gains %.2f/%.2f/%.2f, %s matrix".format(
+                    r, g, b, if (autoColorTransform != null) "AWB" else "calibrated"))
+            } else {
+                val available = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList().orEmpty()
+                builder.set(CaptureRequest.CONTROL_AWB_MODE, awbPreset(kelvin, available, AWB_PRESET_KELVIN))
+            }
         } else if (controls.containsKey(ControlIds.WHITE_BALANCE_AUTO)) {
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            if (colorTemperatureRange != null || calibration != null) {
+                builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_FAST)
+            }
         }
         controls[ControlIds.POWER_LINE_FREQUENCY]?.let { p ->
             val available = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)
@@ -411,8 +490,7 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                     requestBuilder = builder
                     val request = builder.build()
 
-                    s.setSingleRepeatingRequest(request, executor, object :
-                        CameraCaptureSession.CaptureCallback() {})
+                    s.setSingleRepeatingRequest(request, executor, resultLogger)
                     Log.i(TAG, "Camera $cameraId streaming, AE range " +
                         "${request.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE)}")
                 }
@@ -653,3 +731,7 @@ private class FrameEncoder(
         private const val WORKERS = 2
     }
 }
+
+/** A row-major 3x3 matrix as camera metadata, in 1/10000ths. */
+private fun DoubleArray.toColorSpaceTransform() =
+    ColorSpaceTransform(IntArray(18) { if (it % 2 == 0) Math.round(this[it / 2] * 10000).toInt() else 10000 })

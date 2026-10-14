@@ -72,5 +72,8 @@ class ControlMappingTest {
         val front = camera.copy(zoomRatioRange = 1f to 1f, minFocusDistance = 0f,
             awbModes = listOf(CameraMetadata.CONTROL_AWB_MODE_AUTO), antibandingModes = emptyList())
         assertEquals(ControlCaps(), webcamControls(front))
+
+        // No presets, but colour gains can be set from the calibration.
+        assertEquals(ControlCaps(whiteBalance = true), webcamControls(front.copy(manualWhiteBalance = true)))
     }
 }

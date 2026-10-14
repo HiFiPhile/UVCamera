@@ -48,9 +48,9 @@ fun webcamFormats(camera: CameraInfo, maxHeight: Int = Int.MAX_VALUE): List<Form
 
 /**
  * Controls to advertise for [camera]: zoom over its zoom ratio range, manual
- * focus if it has a focus motor and can turn AF off, white balance if it has
- * AWB presets to approximate a temperature, and power line frequency if it
- * offers 50/60 Hz antibanding.
+ * focus if it has a focus motor and can turn AF off, white balance if it can
+ * set colour gains from its calibration or has AWB presets to approximate a
+ * temperature, and power line frequency if it offers 50/60 Hz antibanding.
  */
 fun webcamControls(camera: CameraInfo): ControlCaps {
     val zoom = camera.zoomRatioRange
@@ -60,7 +60,8 @@ fun webcamControls(camera: CameraInfo): ControlCaps {
         CameraMetadata.CONTROL_AF_MODE_OFF in camera.afModes &&
         CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO in camera.afModes
     val presets = camera.awbModes.count { it in AWB_PRESET_KELVIN }
-    val whiteBalance = CameraMetadata.CONTROL_AWB_MODE_AUTO in camera.awbModes && presets >= 2
+    val whiteBalance = CameraMetadata.CONTROL_AWB_MODE_AUTO in camera.awbModes &&
+        (camera.manualWhiteBalance || presets >= 2)
     val powerLine = CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_50HZ in camera.antibandingModes ||
         CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_60HZ in camera.antibandingModes
     return ControlCaps(zoom, focus, whiteBalance, powerLine)

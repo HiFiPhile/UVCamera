@@ -7,6 +7,9 @@ import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
+import android.hardware.camera2.params.ColorSpaceTransform
+import android.os.Build
+import android.util.Range
 
 data class Resolution(val width: Int, val height: Int) {
     val area: Long get() = width.toLong() * height
@@ -40,6 +43,11 @@ data class CameraInfo(
     val afModes: List<Int> = emptyList(),
     val awbModes: List<Int> = emptyList(),
     val antibandingModes: List<Int> = emptyList(),
+    /**
+     * White balance can be set from a temperature, by the camera
+     * ([colorTemperatureRange]) or from its [colorCalibration].
+     */
+    val manualWhiteBalance: Boolean = false,
 )
 
 /** 30 fps, the baseline frame rate every advertised UVC frame size must meet. */
@@ -101,5 +109,48 @@ fun queryCameras(manager: CameraManager): List<CameraInfo> = manager.cameraIdLis
         awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList().orEmpty(),
         antibandingModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)
             ?.toList().orEmpty(),
+        manualWhiteBalance = colorTemperatureRange(chars) != null || colorCalibration(chars) != null,
     )
+}
+
+private fun ColorSpaceTransform.toDoubles(): DoubleArray {
+    val e = IntArray(18)
+    copyElements(e, 0)
+    return DoubleArray(9) { e[2 * it].toDouble() / e[2 * it + 1] }
+}
+
+/**
+ * Colour temperatures the camera can white balance for itself
+ * (COLOR_CORRECTION_MODE_CCT, Android 16), if it can.
+ */
+fun colorTemperatureRange(chars: CameraCharacteristics): Range<Int>? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return null
+    val modes = chars.get(CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_MODES) ?: return null
+    if (CameraMetadata.COLOR_CORRECTION_MODE_CCT !in modes) return null
+    return chars.get(CameraCharacteristics.COLOR_CORRECTION_COLOR_TEMPERATURE_RANGE)
+}
+
+/**
+ * The camera's colour calibration, if it has a usable one and lets apps set
+ * colour correction gains and matrix (MANUAL_POST_PROCESSING).
+ */
+fun colorCalibration(chars: CameraCharacteristics): ColorCalibration? {
+    val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return null
+    if (CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING !in caps) return null
+    fun matrix(key: CameraCharacteristics.Key<ColorSpaceTransform>) = chars.get(key)?.toDoubles()
+
+    val kelvin1 = chars.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1)
+        ?.let(WhiteBalance::referenceKelvin) ?: return null
+    val color1 = matrix(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1) ?: return null
+    val calibration1 = matrix(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1) ?: return null
+    val forward1 = matrix(CameraCharacteristics.SENSOR_FORWARD_MATRIX1) ?: return null
+
+    val kelvin2 = chars.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)
+        ?.let { WhiteBalance.referenceKelvin(it.toInt()) }
+    val color2 = matrix(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)
+    val calibration2 = matrix(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2)
+    val forward2 = matrix(CameraCharacteristics.SENSOR_FORWARD_MATRIX2)
+    if (kelvin2 == null || color2 == null || calibration2 == null || forward2 == null) return null
+    return ColorCalibration(kelvin1, color1, calibration1, forward1, kelvin2, color2, calibration2, forward2)
+        .takeIf { it.distinguishesIlluminants }
 }

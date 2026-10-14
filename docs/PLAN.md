@@ -269,12 +269,26 @@ Done so far:
       not viable on the OnePlus 15, whose reprocessing inputs start at
       3264×1836 (still-capture only). Kept on branch
       `experiment/yuv-reprocess` for phones with 1080p reprocess input.
+- [x] Orientation 0/90/180/270° and left/right, up/down mirroring, applied
+      live: a transform swap in the encoder when the capture size still
+      covers the output, a camera restart otherwise.
+- [x] UVC controls mapped to Camera2 (protocol v4), advertised only when
+      the camera supports them: zoom (`CONTROL_ZOOM_RATIO`), auto/manual
+      focus (`LENS_FOCUS_DISTANCE`), power line frequency (AE antibanding),
+      white balance auto/temperature 2800–6500 K. Verified from OBS on
+      Windows and Linux.
+- [x] White balance temperature: the OnePlus 15 accepts the AWB presets
+      but keeps auto gains, so presets do nothing. The temperature is set
+      with Android 16's `COLOR_CORRECTION_MODE_CCT` where available
+      (OnePlus: 1500–10000 K; results report a vendor AWB mode 9). Older
+      phones get gains computed from the sensor calibration (DNG method:
+      matrices interpolated in mired, white point from the daylight or
+      Planckian locus) with the last AWB colour matrix, unless the
+      calibration whitens each reference illuminant (OnePlus back camera)
+      and so can't tell temperatures apart; presets are the last resort.
 
 Planned:
 
-- UVC controls mapped to Camera2: zoom (`CONTROL_ZOOM_RATIO`), brightness
-  (AE compensation), auto/manual focus, white balance auto, power-line
-  frequency (AE antibanding).
 - YUYV format. Hot-switch the camera (front/back) without re-enumeration.
 - Re-apply after USB mode changes (inotify on `configs/b.1`, UDC state).
 - memfd ring + `USERPTR`/`DMABUF` if profiling shows copy overhead.
