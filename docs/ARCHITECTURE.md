@@ -98,29 +98,44 @@ Logs go to `/data/local/tmp/uvcamera/` (`service.log`, `doctor.log`).
 
 A single static binary per ABI with subcommands:
 
-| Subcommand | Phase | Purpose |
-|---|---|---|
-| `doctor [--probe-function]` | 0 ✅ | Read-only device capability report |
-| `gadget up/down [--test-pattern]` | 1 | Root-only bring-up without the app |
-| `sepatch` | 2 | Live SELinux policy patch |
-| `daemon` | 2 | Long-running service behind the supervisor |
-| `client …` | 2 | Debug CLI speaking the app protocol |
+| Subcommand | Purpose |
+|---|---|
+| `doctor [--probe-function]` | Read-only device capability report |
+| `gadget up/down` | Root-only bring-up with a test pattern, no daemon or app |
+| `sepatch` | Live SELinux policy patch (`post-fs-data.sh`) |
+| `daemon` | Long-running service behind the supervisor |
+| `client status/enable/disable/source` | Debug CLI speaking the app protocol; `source` feeds a reversed test pattern through the frame source channel |
 
-Process model (Phase 2+, from MSD): `service.sh` → `app_process` runs
+Process model (from MSD): `service.sh` → `app_process` runs
 `standalone.AuthSupervisor` as root. The supervisor spawns
 `runcon u:r:uvcamera_daemon:s0 uvcd daemon` with its stdin/stdout as a private
 auth pipe. The daemon drops to `system:system`, keeping only `CAP_CHOWN`
 (configfs creates new nodes as `root:root`, so it must `chown` them),
 `CAP_SYS_NICE` (USB IRQ thread priority) and the `readproc` group (to see
-kernel threads through `/proc`'s `hidepid`). It listens
-on `@uvcamerad` and asks the supervisor to authorize every peer UID, per
-request.
+kernel threads through `/proc`'s `hidepid`). It listens on `@uvcamerad` and
+asks the supervisor to authorize every peer UID: at connect, and again on
+every control request.
 
-Event loop: one thread `poll()`s `/dev/videoN` (V4L2 events + `POLLOUT` for
-buffer completion), the client sockets, and a self-pipe for shutdown. The
-UVC protocol state is a plain struct, `uvc::Session`. It consumes
-`UVC_EVENT_*` and returns actions such as "send response" or "start/stop
-stream". That keeps it unit-testable on the host without a kernel.
+Threads:
+
+- **Main:** accepts connections (polling the listener so SIGTERM is noticed).
+- **One per client connection:** control requests, or, after
+  `AttachSource`, reading frames into the `SourceHub`.
+- **Stream thread (`session.rs`), one per enabled session:** `poll()`s
+  `/dev/videoN` (V4L2 events, `POLLOUT` for completed buffers) and the
+  `SourceHub` eventfd (a new app frame arrived). It answers UVC control
+  requests, queues frames, and reopens the node when Android rebinds the
+  gadget.
+
+The UVC request logic is a plain struct, `uvc::Protocol`: it consumes SETUP
+and DATA payloads and returns replies, so it's unit-tested on the host
+(including request sequences captured from Windows and Linux).
+
+Frame policy (`stream.rs`): a fresh app frame is queued as soon as it
+arrives and a buffer is free. If none arrives within 1.5 frame intervals,
+the last one is repeated (for up to 1 s), then the test pattern is sent as a
+"camera not ready" placeholder. YUYV frames must be exactly w×h×2 bytes and
+MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
 
 ### App (Kotlin + Compose, `app/`)
 
@@ -131,53 +146,70 @@ stream". That keeps it unit-testable on the host without a kernel.
   daemon connection, and opens the camera only between the daemon's
   `StreamStart` and `StreamStop`. The privacy indicator is therefore on only
   while the host is actually streaming.
-- **camera/**: queries Camera2 capabilities (done in Phase 0) to build the
-  `FormatSpec` to advertise. It opens the selected camera with an
-  `ImageReader` in the needed format and pins the AE target FPS range to the
-  committed frame interval.
-- **encoder/**: one interface, `FrameEncoder(format, size, fps) → frames`,
-  with strategies chosen per device:
+- **camera/**: `queryCameras` reads Camera2 capabilities, from which
+  `webcamFormats` builds the formats to advertise (standard sizes the camera
+  delivers at ≥ 30 fps, capped by the user's maximum resolution).
+  `CameraStreamer` opens the selected camera with one `ImageReader`, using
+  `TEMPLATE_PREVIEW` with video stabilization off (lower latency), the AE
+  target fps range pinned to the stream's rate, and continuous-video AF.
+- **Encoding**, chosen per stream:
 
-  | Strategy | Output | Cost | Notes |
+  | Path | Output | Cost (OnePlus 15, 1080p) | When |
   |---|---|---|---|
-  | Camera2 `JPEG` stream | MJPEG | ~0 CPU (ISP/HW) | Only if `minFrameDuration(JPEG, size)` ≤ 33.3 ms. Phase 0 screen reports this. Quality/latency to be verified. |
-  | `YUV_420_888` → libjpeg-turbo (NEON, JNI) | MJPEG | 1 core @1080p30 | Universal fallback |
-  | `YUV_420_888` → YUYV repack | Uncompressed | memcpy | USB 2.0: 640×480@30 max |
-  | `YUV_420_888`/Surface → MediaCodec AVC | H.264 (UVC 1.5 frame-based) | HW | Needs `streaming/framebased` in configfs; Phase 5 |
+  | Camera2 `JPEG` stream | MJPEG | 0.7 ms copy per frame | The camera supports the size at the frame rate and no rotation is needed |
+  | `YUV_420_888` → NV21 → `YuvImage` | MJPEG | ~38 ms per frame, two worker threads → 30 fps | Smaller sizes without hardware JPEG (720p/480p here), or rotated |
+  | `YUV_420_888` → YUYV repack | Uncompressed | a few ms | YUYV streams; USB 2.0 limits it to 640×480@30 |
+  | MediaCodec AVC | H.264 (UVC 1.5 frame-based) | HW | Phase 5; needs `streaming/framebased` |
+
+- **Rotation:** sensor images arrive unrotated. For a landscape mount (top
+  of the phone to the left) the correction is `sensor − 90°` for back
+  cameras and `sensor + 90°` for front cameras, since turning the phone looks
+  opposite to each; on the OnePlus 15 (90°/270°) neither needs a turn. A
+  "Rotate 180°" setting covers an upside-down mount. Only 0° and 180° are
+  supported (a 90° turn wouldn't fit a landscape frame). The camera's JPEG
+  encoder can't rotate, so rotated MJPEG uses the YUV path, which rotates
+  during conversion for free.
+- **FrameSender:** one pending frame per source connection, so a slow socket
+  drops stale frames instead of adding latency.
 
 ## Session lifecycle
 
 ```
- App                        uvcd                         Kernel / Host
+ App (WebcamService)        uvcd                         Kernel / Host
   │ user taps Enable         │                              │
-  │ start WebcamService      │                              │
-  │── connect @uvcamerad ───►│ authorize UID via supervisor │
-  │── Configure(FormatSpec) ►│ pause HAL, UDC="",           │
-  │                          │ mkdir functions/uvc.uvcamera,│
+  │── control: connect ─────►│ authorize UID via supervisor │
+  │── Enable(FormatSpec) ───►│ UDC="", mkdir uvc.uvcamera,  │
   │                          │ write descriptors, link b.1, │
   │                          │ set bDeviceClass EF/02/01,   │
-  │                          │ UDC=<controller>, resume HAL │
+  │                          │ UDC=<controller>             │
   │                          │ open /dev/videoN (function_name match)
+  │── source: connect,       │                              │
+  │   AttachSource ─────────►│ SourceHub.attach             │
   │                          │◄──────── UVC_EVENT_CONNECT ──│ host enumerates
   │                          │◄─ SETUP/DATA: PROBE, COMMIT ─│ host opens camera
   │                          │── UVCIOC_SEND_RESPONSE ─────►│
   │                          │◄──────── UVC_EVENT_STREAMON ─│
-  │                          │ S_FMT, REQBUFS(mmap), STREAMON
-  │◄─ StreamStart(fmt,w,h,ival)                             │
+  │                          │ S_FMT, S_PARM, REQBUFS, STREAMON,
+  │                          │ IRQ thread → SCHED_FIFO      │
+  │◄─ StreamStart(id, fmt) ──│ (placeholder until frames)   │
   │ open camera, encode      │                              │
-  │── Frame(bytes, pts) ────►│ DQBUF free → copy → QBUF ───►│ isoc to host
-  │   … (newest wins when no free buffer)                   │
+  │── Frame(id, pts, bytes) ►│ eventfd → copy → QBUF ──────►│ isoc to host
+  │   … (newest wins)        │                              │
   │                          │◄──────── UVC_EVENT_STREAMOFF │ host closes
-  │◄─ StreamStop             │ STREAMOFF, REQBUFS(0)        │
-  │ close camera             │                              │
+  │◄─ StreamStop(id) ────────│ STREAMOFF, free buffers,     │
+  │ close camera             │ restore IRQ thread           │
   │── Disable ──────────────►│ unlink + rmdir function,     │
   │                          │ restore device class, rebind │
 ```
 
-If the app or its connection dies while the function is linked, the daemon
-keeps the gadget up and feeds a "camera unavailable" placeholder frame. When
-the app reconnects, it resumes. An explicit Disable, or a reboot, removes the
-function.
+If the app or its source connection dies while the function is linked, the
+daemon keeps the gadget up and sends the placeholder. When the app
+re-attaches it resumes without re-enabling (which would re-enumerate). An
+explicit Disable, or a reboot, removes the function.
+
+On devices with a USB gadget HAL, MSD pauses the HAL (SIGSTOP) while
+reconfiguring. That isn't implemented yet: the OnePlus 15 configures the
+gadget from init scripts and has no gadget HAL.
 
 ## Format advertisement
 
@@ -204,22 +236,26 @@ only newer kernels have.
 
 ## IPC protocol
 
-Abstract Unix stream socket `@uvcamerad`. It is versioned and length-prefixed,
-in MSD's style: a protocol-version handshake, then tagged messages. Malformed
-input closes the connection.
+Abstract Unix stream socket `@uvcamerad`, protocol version 2 (`message.rs`,
+mirrored by `Message.kt`, with golden-byte tests on both sides). After a
+version handshake, a connection carries tagged little-endian messages in
+MSD's style. Malformed input closes the connection.
 
-- **Control (app → daemon):** `GetStatus`, `Configure(FormatSpec)`,
-  `Disable`, `ControlValue(id, value)`.
-- **Control (daemon → app):** `Status`, `StreamStart(format, w, h,
-  interval)`, `StreamStop`, `ControlRequest(id, value)` (host changed
-  zoom/brightness), `Error`.
-- **Frames (app → daemon):** `Frame(pts_us, len, bytes)` on the same
-  connection. MJPEG at 1080p30 is about 10 MB/s, trivial for a Unix socket.
+- **Control connection:** request/response. `GetStatus` → `Status` (enabled,
+  host link speed, current stream, fps sent, fps received from the app,
+  failed frames), `Enable(maxburst, formats)`, `Disable`.
+- **Source connection:** a second connection sends `AttachSource` and then
+  carries frames. The daemon sends `StreamStart(stream_id, params)` and
+  `StreamStop(stream_id)`. The app sends `Frame(stream_id, pts_us, bytes)`,
+  where `pts_us` is the sensor capture time in CLOCK_MONOTONIC (for latency
+  stats). Frames for an old `stream_id` are dropped, so a format switch
+  can't show stale frames. Frames are authorized once at attach, not per
+  frame: they can only change what the host sees, not the gadget.
 
-The daemon copies each frame into a mmap'd V4L2 buffer. If profiling shows the
-copy matters (YUYV, high resolutions), Phase 4 replaces inline frames with a
-memfd ring passed via `SCM_RIGHTS`, plus `V4L2_MEMORY_USERPTR`/`DMABUF`. The
-uvc queue supports `VB2_MMAP | VB2_USERPTR | VB2_DMABUF`.
+MJPEG at 1080p30 is about 10 MB/s and YUYV at 640×480@30 about 18 MB/s, easy
+for a Unix socket. The daemon copies each frame into a mmap'd V4L2 buffer
+(~0.2 ms). A memfd ring with `V4L2_MEMORY_USERPTR`/`DMABUF` would avoid the
+copy, but measurements don't call for it.
 
 ## SELinux
 
