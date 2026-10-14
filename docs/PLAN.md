@@ -271,7 +271,9 @@ Done so far:
       `experiment/yuv-reprocess` for phones with 1080p reprocess input.
 - [x] Orientation 0/90/180/270° and left/right, up/down mirroring, applied
       live: a transform swap in the encoder when the capture size still
-      covers the output, a camera restart otherwise.
+      covers the output, a camera restart otherwise. 1080p at 90°/270°
+      captures 2560×1920 (both cameras) and encodes in ~27–31 ms per
+      frame, 28–30 fps.
 - [x] UVC controls mapped to Camera2 (protocol v4), advertised only when
       the camera supports them: zoom (`CONTROL_ZOOM_RATIO`), auto/manual
       focus (`LENS_FOCUS_DISTANCE`), power line frequency (AE antibanding),
