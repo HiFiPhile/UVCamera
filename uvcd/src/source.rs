@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     message::{Frame, SourceEvent},
-    uvc::StreamParams,
+    uvc::{BRIGHTNESS_DEF, Control, StreamParams},
 };
 
 const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
@@ -44,6 +44,8 @@ struct Inner {
     /// Newest frame for the current stream that the stream thread hasn't
     /// taken yet.
     pending: Option<(Frame, Instant)>,
+    /// Brightness the host set, if any.
+    brightness: Option<i16>,
 }
 
 impl Inner {
@@ -110,6 +112,10 @@ impl SourceHub {
         inner.source = Some(Attached { id, writer });
         info!("Frame source {id} attached");
 
+        // Bring the new source up to date.
+        if let Some(value) = inner.brightness {
+            inner.send(&SourceEvent::Control(Control::Brightness(value)));
+        }
         if let Some((stream_id, params)) = inner.stream {
             inner.send(&SourceEvent::StreamStart { stream_id, params });
         }
@@ -140,6 +146,24 @@ impl SourceHub {
         inner.pending = None;
         inner.send(&SourceEvent::StreamStart { stream_id, params });
         stream_id
+    }
+
+    /// The host changed a control: remember it and tell the source.
+    pub fn control_changed(&self, control: Control) {
+        let mut inner = self.inner.lock().unwrap();
+        match control {
+            Control::Brightness(v) => inner.brightness = Some(v),
+        }
+        inner.send(&SourceEvent::Control(control));
+    }
+
+    /// Current control values, for restoring them when the video node is
+    /// reopened.
+    pub fn controls(&self) -> Vec<Control> {
+        let inner = self.inner.lock().unwrap();
+        vec![Control::Brightness(
+            inner.brightness.unwrap_or(BRIGHTNESS_DEF),
+        )]
     }
 
     /// The host stopped streaming.

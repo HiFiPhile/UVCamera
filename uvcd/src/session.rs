@@ -233,11 +233,15 @@ impl Server {
             // This activates the function and connects to the host.
             dev.subscribe_uvc_events()?;
 
-            let protocol = Protocol::new(
+            let mut protocol = Protocol::new(
                 self.table.clone(),
                 self.entities,
                 self.endpoint.max_payload(Speed::High),
             );
+            // Keep host-set controls across rebinds.
+            for control in self.source.controls() {
+                protocol.set_control(control);
+            }
             let irq_boost = self.irq_udc.as_deref().map(IrqBoost::new);
             let exit = Streamer::new(
                 dev,

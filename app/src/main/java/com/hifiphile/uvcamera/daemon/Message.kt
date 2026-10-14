@@ -8,10 +8,14 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
-// Daemon protocol, version 2. Mirrors uvcd/src/message.rs, which documents
+// Daemon protocol, version 3. Mirrors uvcd/src/message.rs, which documents
 // the wire format. All integers are little endian.
 
-const val PROTOCOL_VERSION = 2
+const val PROTOCOL_VERSION = 3
+
+/** Brightness control id; values 0..255, 128 meaning no change. */
+const val CONTROL_BRIGHTNESS = 1
+const val BRIGHTNESS_DEFAULT = 128
 const val SOCKET_NAME = "uvcamerad"
 
 enum class FormatKind(val wire: Int) {
@@ -153,10 +157,14 @@ sealed interface SourceEvent {
     /** The host stopped streaming; release the camera. */
     data class StreamStop(val streamId: Int) : SourceEvent
 
+    /** The host changed camera control [control] (e.g. [CONTROL_BRIGHTNESS]) to [value]. */
+    data class Control(val control: Int, val value: Int) : SourceEvent
+
     companion object {
         fun read(input: Reader): SourceEvent = when (val id = input.u8()) {
             1 -> StreamStart(input.u32().toInt(), input.streamParams())
             2 -> StreamStop(input.u32().toInt())
+            3 -> Control(input.u8(), input.u32().toInt())
             else -> throw IOException("Unknown source event: $id")
         }
     }

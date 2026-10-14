@@ -71,6 +71,11 @@ class MessageTest {
             SourceEvent.StreamStop(7),
             SourceEvent.read(Reader(ByteArrayInputStream(bytes(2, 7, 0, 0, 0)))),
         )
+        // Same bytes as uvcd's message.rs.
+        assertEquals(
+            SourceEvent.Control(CONTROL_BRIGHTNESS, 200),
+            SourceEvent.read(Reader(ByteArrayInputStream(bytes(3, 1, 200, 0, 0, 0)))),
+        )
     }
 
     @Test

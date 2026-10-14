@@ -75,12 +75,14 @@ fn run_source(mut client: Client) -> Result<()> {
                 match SourceEvent::read_from(&mut reader) {
                     Ok(event) => {
                         println!("{event:?}");
-                        *current.lock().unwrap() = match event {
+                        match event {
                             SourceEvent::StreamStart { stream_id, params } => {
-                                Some((stream_id, params))
+                                *current.lock().unwrap() = Some((stream_id, params));
                             }
-                            SourceEvent::StreamStop { .. } => None,
-                        };
+                            SourceEvent::StreamStop { .. } => *current.lock().unwrap() = None,
+                            // A test pattern has nothing to adjust.
+                            SourceEvent::Control(_) => {}
+                        }
                     }
                     Err(e) => {
                         println!("Source channel closed: {e}");

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 HiFiPhile
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Daemon protocol, version 2. Mirrored by the app's `daemon/Message.kt`.
+//! Daemon protocol, version 3. Mirrored by the app's `daemon/Message.kt`.
 //!
 //! After connecting, the client sends the protocol version (u8) and the
 //! daemon answers 1 (accepted) or 0. Then the client sends requests and
@@ -30,11 +30,15 @@
 //! ```text
 //! daemon -> app := 1 StreamStart stream_id:u32 StreamParams
 //!                | 2 StreamStop  stream_id:u32
+//!                | 3 Control     control:u8 value:i32
 //! app -> daemon := 1 Frame stream_id:u32 pts_us:u64 len:u32 data[len]
 //! ```
 //!
 //! The app produces frames in the format of the latest `StreamStart` and
 //! tags them with its `stream_id`; frames for any other id are dropped.
+//! `Control` carries a camera control the host changed (and the current
+//! values when the source attaches): control 1 is brightness, 0..=255 with
+//! 128 meaning no change.
 
 use std::io::{self, Read, Write};
 
@@ -43,13 +47,13 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crate::{
     stream::StreamStatus,
     uvc::{
-        StreamParams,
+        Control, StreamParams,
         format::{FormatKind, FormatSpec, FrameSpec},
     },
     v4l2::Speed,
 };
 
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 /// Abstract Unix socket name.
 pub const SOCKET_NAME: &str = "uvcamerad";
 
@@ -348,6 +352,8 @@ pub enum SourceEvent {
     },
     /// The host stopped streaming; release the camera.
     StreamStop { stream_id: u32 },
+    /// The host changed a camera control.
+    Control(Control),
 }
 
 impl SourceEvent {
@@ -360,6 +366,16 @@ impl SourceEvent {
             2 => Ok(Self::StreamStop {
                 stream_id: r.read_u32::<LittleEndian>()?,
             }),
+            3 => {
+                let id = r.read_u8()?;
+                let value = r.read_i32::<LittleEndian>()?;
+                match id {
+                    1 => Ok(Self::Control(Control::Brightness(
+                        i16::try_from(value).map_err(|_| invalid("Brightness out of range"))?,
+                    ))),
+                    _ => Err(invalid(format!("Unknown control: {id}"))),
+                }
+            }
             id => Err(invalid(format!("Unknown source event: {id}"))),
         }
     }
@@ -374,6 +390,11 @@ impl SourceEvent {
             Self::StreamStop { stream_id } => {
                 w.write_u8(2)?;
                 w.write_u32::<LittleEndian>(*stream_id)
+            }
+            Self::Control(Control::Brightness(value)) => {
+                w.write_u8(3)?;
+                w.write_u8(1)?;
+                w.write_i32::<LittleEndian>(i32::from(*value))
             }
         }
     }
@@ -552,6 +573,7 @@ mod tests {
                 params,
             },
             SourceEvent::StreamStop { stream_id: 7 },
+            SourceEvent::Control(Control::Brightness(200)),
         ] {
             let mut buf = vec![];
             e.write_to(&mut buf).unwrap();
@@ -559,6 +581,12 @@ mod tests {
         }
 
         // Same bytes as the app's MessageTest.kt.
+        let mut buf = vec![];
+        SourceEvent::Control(Control::Brightness(200))
+            .write_to(&mut buf)
+            .unwrap();
+        assert_eq!(buf, [3, 1, 200, 0, 0, 0]);
+
         let frame = Frame {
             stream_id: 7,
             pts_us: 0x0102_0304_0506_0708,

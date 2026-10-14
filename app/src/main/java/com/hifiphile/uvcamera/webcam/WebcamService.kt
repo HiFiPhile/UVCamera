@@ -18,6 +18,7 @@ import com.hifiphile.uvcamera.MainActivity
 import com.hifiphile.uvcamera.R
 import com.hifiphile.uvcamera.camera.CameraStreamer
 import com.hifiphile.uvcamera.camera.queryCameras
+import com.hifiphile.uvcamera.daemon.CONTROL_BRIGHTNESS
 import com.hifiphile.uvcamera.daemon.Client
 import com.hifiphile.uvcamera.daemon.SourceChannel
 import com.hifiphile.uvcamera.daemon.SourceEvent
@@ -197,6 +198,12 @@ class WebcamService : Service() {
                             { data, length, ptsUs -> sender.offer(streamId, data, length, ptsUs) },
                             { error -> _state.update { it.copy(error = error) } },
                         )
+                    }
+                    is SourceEvent.Control -> {
+                        if (event.control == CONTROL_BRIGHTNESS) {
+                            Log.i(TAG, "Host set brightness ${event.value}")
+                            streamer.setBrightness(event.value)
+                        }
                     }
                     is SourceEvent.StreamStop -> {
                         Log.i(TAG, "Host stopped stream ${event.streamId}")

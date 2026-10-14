@@ -44,9 +44,9 @@ const INFO_GET: u8 = 0x01;
 // AE mode bitmap: auto mode only.
 const AE_MODE_AUTO: u8 = 0x02;
 
-const BRIGHTNESS_MIN: i16 = 0;
-const BRIGHTNESS_MAX: i16 = 255;
-const BRIGHTNESS_DEF: i16 = 128;
+pub const BRIGHTNESS_MIN: i16 = 0;
+pub const BRIGHTNESS_MAX: i16 = 255;
+pub const BRIGHTNESS_DEF: i16 = 128;
 
 /// dwClockFrequency reported in the UVC 1.1 probe structure (48 MHz, the
 /// value f_uvc puts in the control header).
@@ -197,6 +197,23 @@ pub struct StreamParams {
     pub height: u16,
     pub interval: Interval,
     pub max_frame_size: u32,
+}
+
+/// A camera control the host can set, forwarded to the frame source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// Processing unit brightness, [`BRIGHTNESS_MIN`]..=[`BRIGHTNESS_MAX`],
+    /// default [`BRIGHTNESS_DEF`].
+    Brightness(i16),
+}
+
+/// What a host-to-device data stage changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataOutcome {
+    None,
+    /// The host committed a stream format.
+    Committed,
+    ControlChanged(Control),
 }
 
 /// Which control a pending host-to-device data stage is for.
@@ -354,38 +371,47 @@ impl Protocol {
         }
     }
 
-    /// Host-to-device data stage of the last SETUP. Returns whether the host
-    /// just committed a stream format.
-    pub fn handle_data(&mut self, data: &[u8]) -> bool {
+    /// Restore a control value, e.g. when the video node is reopened.
+    pub fn set_control(&mut self, control: Control) {
+        match control {
+            Control::Brightness(v) => self.brightness = v,
+        }
+    }
+
+    /// Host-to-device data stage of the last SETUP.
+    pub fn handle_data(&mut self, data: &[u8]) -> DataOutcome {
         debug!(?data, "Setup data");
 
         match self.pending.take() {
             Some(Pending::Probe) => {
                 self.probe = self.negotiate(&StreamingControl::parse(data));
                 debug!(probe = ?self.probe, "Probe");
-                false
+                DataOutcome::None
             }
             Some(Pending::Commit) => {
                 self.commit = self.negotiate(&StreamingControl::parse(data));
                 debug!(commit = ?self.commit, "Commit");
-                true
+                DataOutcome::Committed
             }
             Some(Pending::Brightness) if data.len() >= 2 => {
                 let value = i16::from_le_bytes([data[0], data[1]]);
-                if (BRIGHTNESS_MIN..=BRIGHTNESS_MAX).contains(&value) {
-                    self.brightness = value;
-                } else {
+                if !(BRIGHTNESS_MIN..=BRIGHTNESS_MAX).contains(&value) {
                     self.error_code = ErrorCode::OutOfRange;
+                    DataOutcome::None
+                } else if value == self.brightness {
+                    DataOutcome::None
+                } else {
+                    self.brightness = value;
+                    DataOutcome::ControlChanged(Control::Brightness(value))
                 }
-                false
             }
             Some(Pending::AeMode) if !data.is_empty() => {
                 if data[0] != AE_MODE_AUTO {
                     self.error_code = ErrorCode::OutOfRange;
                 }
-                false
+                DataOutcome::None
             }
-            _ => false,
+            _ => DataOutcome::None,
         }
     }
 
@@ -565,7 +591,7 @@ mod tests {
             frame_interval: 500_000,
             ..Default::default()
         };
-        assert!(!p.handle_data(&proposal.to_bytes()));
+        assert_eq!(p.handle_data(&proposal.to_bytes()), DataOutcome::None);
 
         let probe =
             StreamingControl::parse(&data(p.handle_setup(&get(GET_CUR, VS_PROBE_CONTROL, 1))));
@@ -574,7 +600,7 @@ mod tests {
         assert_eq!(probe.max_video_frame_size, 640 * 480 * 2);
 
         assert_eq!(p.handle_setup(&set(VS_COMMIT_CONTROL, 1)), Reply::Receive);
-        assert!(p.handle_data(&probe.to_bytes()));
+        assert_eq!(p.handle_data(&probe.to_bytes()), DataOutcome::Committed);
         assert_eq!(
             p.committed(),
             StreamParams {
@@ -642,7 +668,16 @@ mod tests {
             p.handle_setup(&set(PU_BRIGHTNESS_CONTROL, pu)),
             Reply::Receive
         );
-        p.handle_data(&200i16.to_le_bytes());
+        assert_eq!(
+            p.handle_data(&200i16.to_le_bytes()),
+            DataOutcome::ControlChanged(Control::Brightness(200))
+        );
+        // Setting the same value again is not a change.
+        p.handle_setup(&set(PU_BRIGHTNESS_CONTROL, pu));
+        assert_eq!(p.handle_data(&200i16.to_le_bytes()), DataOutcome::None);
+        // Out of range is rejected with an error code.
+        p.handle_setup(&set(PU_BRIGHTNESS_CONTROL, pu));
+        assert_eq!(p.handle_data(&300i16.to_le_bytes()), DataOutcome::None);
         assert_eq!(
             data(p.handle_setup(&get(GET_CUR, PU_BRIGHTNESS_CONTROL, pu))),
             200i16.to_le_bytes()
@@ -764,7 +799,7 @@ mod tests {
         // Probe/commit.
         p.handle_setup(&r(161, GET_CUR, 256, 1, 34));
         assert_eq!(p.handle_setup(&r(33, SET_CUR, 256, 1, 34)), Reply::Receive);
-        assert!(!p.handle_data(&PROBE));
+        assert_eq!(p.handle_data(&PROBE), DataOutcome::None);
         let probe = StreamingControl::parse(&data(p.handle_setup(&r(161, GET_CUR, 256, 1, 34))));
         assert_eq!(
             (probe.format_index, probe.frame_index, probe.frame_interval),
@@ -778,7 +813,7 @@ mod tests {
         p.handle_setup(&r(161, GET_CUR, 256, 1, 34));
 
         assert_eq!(p.handle_setup(&r(33, SET_CUR, 512, 1, 34)), Reply::Receive);
-        assert!(p.handle_data(&COMMIT));
+        assert_eq!(p.handle_data(&COMMIT), DataOutcome::Committed);
         assert_eq!(
             p.committed(),
             StreamParams {
@@ -884,7 +919,7 @@ mod tests {
 
         // Commit MJPEG 1080p60.
         assert_eq!(p.handle_setup(&r(33, SET_CUR, 512, 1, 34)), Reply::Receive);
-        assert!(p.handle_data(&probe(1, 1, 166_666)));
+        assert_eq!(p.handle_data(&probe(1, 1, 166_666)), DataOutcome::Committed);
         assert_eq!(
             p.committed(),
             StreamParams {

@@ -14,6 +14,7 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -21,10 +22,16 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
+import com.hifiphile.uvcamera.daemon.BRIGHTNESS_DEFAULT
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.StreamParams
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
+import java.util.ArrayDeque
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicLong
 
 /** How frames for a stream are produced. */
 enum class EncodeMode {
@@ -75,6 +82,19 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         }
 
         /**
+         * Map UVC brightness (0..255, 128 = no change) onto the camera's AE
+         * compensation range [lower, upper] (in compensation steps), linearly
+         * on each side of 128 so the default is exactly 0.
+         */
+        fun brightnessToCompensation(brightness: Int, lower: Int, upper: Int): Int {
+            val b = brightness.coerceIn(0, 255)
+            return when {
+                b >= 128 -> Math.round((b - 128) / 127.0 * upper).toInt()
+                else -> Math.round((128 - b) / 128.0 * lower).toInt()
+            }
+        }
+
+        /**
          * The AE target range for [fps]: exactly [fps, fps] if offered, else
          * the narrowest range topping out at [fps], else any containing it.
          */
@@ -93,6 +113,30 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     private var reader: ImageReader? = null
     private var encoder: FrameEncoder? = null
     private var active: Pair<StreamParams, Boolean>? = null
+    private var requestBuilder: CaptureRequest.Builder? = null
+    private var aeCompensationRange: Range<Int>? = null
+
+    /** Host brightness, applied as AE compensation; kept across camera restarts. */
+    private var brightness = BRIGHTNESS_DEFAULT
+
+    /** Apply the host's brightness control, now and to future streams. */
+    fun setBrightness(value: Int) {
+        handler.post {
+            brightness = value
+            val builder = requestBuilder ?: return@post
+            val session = session ?: return@post
+            applyBrightness(builder)
+            session.setSingleRepeatingRequest(builder.build(), executor,
+                object : CameraCaptureSession.CaptureCallback() {})
+        }
+    }
+
+    private fun applyBrightness(builder: CaptureRequest.Builder) {
+        val range = aeCompensationRange ?: return
+        val compensation = brightnessToCompensation(brightness, range.lower, range.upper)
+        builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, compensation)
+        Log.i(TAG, "Brightness $brightness -> AE compensation $compensation (range $range)")
+    }
 
     /** Start (or restart) producing frames in [params], rotated by 180° if [rotate180]. */
     fun start(params: StreamParams, rotate180: Boolean, sink: FrameSink, onError: (String) -> Unit) {
@@ -199,7 +243,9 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
 
                     // PREVIEW rather than RECORD: it is tuned for latency, and
                     // video stabilization would buffer several frames.
-                    val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    aeCompensationRange =
+                        chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+                    val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(reader.surface)
                         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                         set(
@@ -217,7 +263,12 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                             set(CaptureRequest.JPEG_QUALITY, JPEG_QUALITY.toByte())
                             set(CaptureRequest.JPEG_ORIENTATION, 0)
                         }
-                    }.build()
+                    }
+                    if (brightness != BRIGHTNESS_DEFAULT) {
+                        applyBrightness(builder)
+                    }
+                    requestBuilder = builder
+                    val request = builder.build()
 
                     s.setSingleRepeatingRequest(request, executor, object :
                         CameraCaptureSession.CaptureCallback() {})
@@ -243,6 +294,7 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         session = null
         device?.close()
         device = null
+        requestBuilder = null
         reader?.close()
         reader = null
         encoder?.close()
@@ -260,7 +312,7 @@ private class PlaneSet {
     var u: Plane? = null
     var v: Plane? = null
 
-    fun fill(image: android.media.Image) {
+    fun fill(image: Image) {
         val planes = image.planes
         y = Plane.from(planes[0], y?.data)
         u = Plane.from(planes[1], u?.data)
@@ -290,7 +342,7 @@ private class FrameEncoder(
     /** Image timestamps are in the elapsedRealtime (boot time) clock. */
     private val realtimeTimestamps: Boolean,
     private val sink: FrameSink,
-) : ImageReader.OnImageAvailableListener, java.io.Closeable {
+) : ImageReader.OnImageAvailableListener, Closeable {
     private val width = params.width
     private val height = params.height
     private val rect = Rect(0, 0, width, height)
@@ -298,19 +350,19 @@ private class FrameEncoder(
     private val workers = if (mode == EncodeMode.HW_JPEG) {
         null
     } else {
-        java.util.concurrent.Executors.newFixedThreadPool(WORKERS) { r ->
+        Executors.newFixedThreadPool(WORKERS) { r ->
             Thread(r, "frame-encoder")
         }
     }
     private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
 
     /** Free plane sets; one more than the workers so the camera never waits. */
-    private val freeSets = java.util.ArrayDeque<PlaneSet>().apply {
+    private val freeSets = ArrayDeque<PlaneSet>().apply {
         repeat(WORKERS + 1) { add(PlaneSet()) }
     }
 
     private var nextSeq = 0L
-    private val lastDelivered = java.util.concurrent.atomic.AtomicLong(-1)
+    private val lastDelivered = AtomicLong(-1)
 
     @Volatile
     private var closed = false
@@ -363,7 +415,7 @@ private class FrameEncoder(
 
         try {
             workers.execute { encode(set, seq, ptsUs) }
-        } catch (e: java.util.concurrent.RejectedExecutionException) {
+        } catch (e: RejectedExecutionException) {
             // Closed meanwhile.
             synchronized(freeSets) { freeSets.addLast(set) }
         }

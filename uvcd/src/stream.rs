@@ -22,7 +22,7 @@ use crate::{
     pattern::TestPattern,
     source::SourceHub,
     util::monotonic_us,
-    uvc::{Protocol, Reply, StreamParams, format::FormatKind},
+    uvc::{DataOutcome, Protocol, Reply, StreamParams, format::FormatKind},
     v4l2::{Event, Speed, VideoDevice},
 };
 
@@ -248,11 +248,16 @@ impl Streamer {
                     self.dev.send_stall()?;
                 }
             },
-            Event::Data(data) => {
-                if self.protocol.handle_data(&data) {
+            Event::Data(data) => match self.protocol.handle_data(&data) {
+                DataOutcome::None => {}
+                DataOutcome::Committed => {
                     info!("Host committed {:?}", self.protocol.committed());
                 }
-            }
+                DataOutcome::ControlChanged(control) => {
+                    info!("Host set {control:?}");
+                    self.source.control_changed(control);
+                }
+            },
             Event::StreamOn => {
                 if self.stream.is_some() {
                     self.stop_stream();
