@@ -65,13 +65,24 @@ class WebcamFormatsTest {
     }
 
     @Test
-    fun rotationNormalizesSensorsThenAppliesUserFlip() {
+    fun rotationDependsOnFacingThenAppliesUserFlip() {
         val back = camera(emptyList(), emptyList())
         val front = back.copy(id = "1", facing = Facing.FRONT, sensorOrientation = 270)
+        // OnePlus 15 (back 90°, front 270°): both upright in the same landscape
+        // position. The front camera's 0° was confirmed on the device (a 180°
+        // turn came out upside down).
+        assertEquals(0, WebcamSettings.landscapeRotation(back))
+        assertEquals(0, WebcamSettings.landscapeRotation(front))
         assertEquals(false, WebcamSettings.needsRotate180(back, userRotate180 = false))
-        assertEquals(true, WebcamSettings.needsRotate180(front, userRotate180 = false))
-        assertEquals(true, WebcamSettings.needsRotate180(back, userRotate180 = true))
-        assertEquals(false, WebcamSettings.needsRotate180(front, userRotate180 = true))
+        assertEquals(false, WebcamSettings.needsRotate180(front, userRotate180 = false))
+        assertEquals(true, WebcamSettings.needsRotate180(front, userRotate180 = true))
+
+        // Sensors mounted the other way (e.g. the Nexus 5X back camera at 270°).
+        val flippedBack = back.copy(sensorOrientation = 270)
+        val flippedFront = front.copy(sensorOrientation = 90)
+        assertEquals(true, WebcamSettings.needsRotate180(flippedBack, userRotate180 = false))
+        assertEquals(true, WebcamSettings.needsRotate180(flippedFront, userRotate180 = false))
+        assertEquals(false, WebcamSettings.needsRotate180(flippedBack, userRotate180 = true))
     }
 
     @Test

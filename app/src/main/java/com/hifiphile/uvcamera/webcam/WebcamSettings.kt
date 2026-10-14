@@ -41,14 +41,27 @@ class WebcamSettings(context: Context) {
         private const val KEY_ROTATE_180 = "rotate_180"
 
         /**
-         * Whether frames from [camera] need a 180° turn so that every camera
-         * comes out upright with the phone in the same landscape position
-         * (top of the phone to the left, where 90° sensors such as most
-         * back cameras are upright), then flipped again for [userRotate180].
-         * Sensors mounted at 270° (most front cameras) need the turn.
+         * Clockwise rotation that makes [camera]'s frames upright with the
+         * phone in landscape, top to the left. Turning the phone looks
+         * opposite to front and back cameras, so the same physical position
+         * needs `sensor - 90` for back cameras and `sensor + 90` for front
+         * ones: 0 for the usual 90° back and 270° front sensors.
+         */
+        fun landscapeRotation(camera: CameraInfo): Int = when (camera.facing) {
+            Facing.BACK -> (camera.sensorOrientation + 270) % 360
+            Facing.FRONT -> (camera.sensorOrientation + 90) % 360
+            // External cameras deliver upright images.
+            Facing.EXTERNAL -> 0
+        }
+
+        /**
+         * Whether frames from [camera] need a 180° turn: its landscape
+         * correction, flipped again for [userRotate180]. Only 0° and 180°
+         * are supported (a 90° turn wouldn't fit a landscape frame), which
+         * covers sensors mounted at 90° or 270°.
          */
         fun needsRotate180(camera: CameraInfo, userRotate180: Boolean): Boolean =
-            (camera.sensorOrientation == 270) != userRotate180
+            (landscapeRotation(camera) == 180) != userRotate180
 
         /** The chosen camera, or the first back camera, or any camera. */
         fun pickCamera(cameras: List<CameraInfo>, cameraId: String?): CameraInfo? =
