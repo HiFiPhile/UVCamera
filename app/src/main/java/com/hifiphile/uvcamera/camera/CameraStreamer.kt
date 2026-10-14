@@ -91,6 +91,7 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
+    private var encoder: FrameEncoder? = null
     private var active: Pair<StreamParams, Boolean>? = null
 
     /** Start (or restart) producing frames in [params], rotated by 180° if [rotate180]. */
@@ -138,8 +139,9 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         val reader = ImageReader.newInstance(params.width, params.height, format, MAX_IMAGES)
         val realtimeTimestamps = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
-        reader.setOnImageAvailableListener(
-            FrameEncoder(mode, params, rotate180, realtimeTimestamps, sink), handler)
+        val encoder = FrameEncoder(mode, params, rotate180, realtimeTimestamps, sink)
+        reader.setOnImageAvailableListener(encoder, handler)
+        this.encoder = encoder
         this.reader = reader
         active = params to rotate180
 
@@ -243,6 +245,8 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         device = null
         reader?.close()
         reader = null
+        encoder?.close()
+        encoder = null
         if (active != null) {
             Log.i(TAG, "Camera $cameraId closed")
         }
@@ -250,7 +254,35 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     }
 }
 
-/** Turns each camera image into a frame for the host, on the camera thread. */
+/** Plane copies of one camera image, recycled between frames. */
+private class PlaneSet {
+    var y: Plane? = null
+    var u: Plane? = null
+    var v: Plane? = null
+
+    fun fill(image: android.media.Image) {
+        val planes = image.planes
+        y = Plane.from(planes[0], y?.data)
+        u = Plane.from(planes[1], u?.data)
+        v = Plane.from(planes[2], v?.data)
+    }
+}
+
+/** Per-worker conversion buffers. */
+private class WorkerBuffers(width: Int, height: Int, mode: EncodeMode) {
+    val nv21 = if (mode == EncodeMode.YUV_JPEG) ByteArray(width * height * 3 / 2) else null
+    val jpegOut = ByteArrayOutputStream(width * height / 4)
+}
+
+/**
+ * Turns each camera image into a frame for the host.
+ *
+ * Hardware JPEG frames are just copied, on the camera thread. YUV frames are
+ * copied out of the image on the camera thread (so the camera can reuse it)
+ * and converted/compressed on [WORKERS] threads: software JPEG at 1080p takes
+ * longer than a frame interval on one core. Frames that finish out of order
+ * are dropped so the host never goes backwards.
+ */
 private class FrameEncoder(
     private val mode: EncodeMode,
     params: StreamParams,
@@ -258,23 +290,39 @@ private class FrameEncoder(
     /** Image timestamps are in the elapsedRealtime (boot time) clock. */
     private val realtimeTimestamps: Boolean,
     private val sink: FrameSink,
-) : ImageReader.OnImageAvailableListener {
+) : ImageReader.OnImageAvailableListener, java.io.Closeable {
     private val width = params.width
     private val height = params.height
-
-    // Reused between frames.
-    private val jpegOut = ByteArrayOutputStream(width * height / 4)
-    private var yScratch: ByteArray? = null
-    private var uScratch: ByteArray? = null
-    private var vScratch: ByteArray? = null
-    private val nv21 = if (mode == EncodeMode.YUV_JPEG) ByteArray(width * height * 3 / 2) else null
     private val rect = Rect(0, 0, width, height)
 
-    // Encode cost, logged every STATS_PERIOD_NS.
+    private val workers = if (mode == EncodeMode.HW_JPEG) {
+        null
+    } else {
+        java.util.concurrent.Executors.newFixedThreadPool(WORKERS) { r ->
+            Thread(r, "frame-encoder")
+        }
+    }
+    private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
+
+    /** Free plane sets; one more than the workers so the camera never waits. */
+    private val freeSets = java.util.ArrayDeque<PlaneSet>().apply {
+        repeat(WORKERS + 1) { add(PlaneSet()) }
+    }
+
+    private var nextSeq = 0L
+    private val lastDelivered = java.util.concurrent.atomic.AtomicLong(-1)
+
+    @Volatile
+    private var closed = false
+
+    // Stats, logged every STATS_PERIOD_NS.
+    private val statsLock = Any()
     private var statsSince = System.nanoTime()
     private var statsFrames = 0
     private var statsTotalNs = 0L
     private var statsMaxNs = 0L
+    private var statsBusy = 0
+    private var statsOutOfOrder = 0
 
     override fun onImageAvailable(reader: ImageReader) {
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
@@ -288,44 +336,87 @@ private class FrameEncoder(
         } else {
             now / 1000
         }
+        val seq = nextSeq++
 
-        val start = System.nanoTime()
-        image.use {
-            when (mode) {
-                EncodeMode.HW_JPEG -> {
-                    val buffer = image.planes[0].buffer
-                    val length = buffer.remaining()
-                    // A fresh array per frame: the sender may still hold the
-                    // previous one.
-                    val data = ByteArray(length)
-                    buffer.get(data)
-                    sink.onFrame(data, length, ptsUs)
-                }
-
-                EncodeMode.YUV_JPEG, EncodeMode.YUYV -> {
-                    val planes = image.planes
-                    val y = Plane.from(planes[0], yScratch).also { yScratch = it.data }
-                    val u = Plane.from(planes[1], uScratch).also { uScratch = it.data }
-                    val v = Plane.from(planes[2], vScratch).also { vScratch = it.data }
-
-                    if (mode == EncodeMode.YUYV) {
-                        val out = ByteArray(width * height * 2)
-                        yuv420ToYuyv(width, height, y, u, v, out, rotate180)
-                        sink.onFrame(out, out.size, ptsUs)
-                    } else {
-                        yuv420ToNv21(width, height, y, u, v, nv21!!, rotate180)
-                        jpegOut.reset()
-                        YuvImage(nv21, ImageFormat.NV21, width, height, null)
-                            .compressToJpeg(rect, JPEG_QUALITY, jpegOut)
-                        sink.onFrame(jpegOut.toByteArray(), jpegOut.size(), ptsUs)
-                    }
-                }
+        if (workers == null) {
+            image.use {
+                val start = System.nanoTime()
+                val buffer = image.planes[0].buffer
+                val length = buffer.remaining()
+                // A fresh array per frame: the sender may still hold the
+                // previous one.
+                val data = ByteArray(length)
+                buffer.get(data)
+                deliver(seq, data, length, ptsUs, System.nanoTime() - start)
             }
+            return
         }
-        recordStats(System.nanoTime() - start)
+
+        val set = synchronized(freeSets) { freeSets.pollFirst() }
+        if (set == null) {
+            // All workers busy: drop this camera frame rather than queue it.
+            image.close()
+            synchronized(statsLock) { statsBusy++ }
+            return
+        }
+        image.use { set.fill(it) }
+
+        try {
+            workers.execute { encode(set, seq, ptsUs) }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Closed meanwhile.
+            synchronized(freeSets) { freeSets.addLast(set) }
+        }
     }
 
-    private fun recordStats(elapsedNs: Long) {
+    private fun encode(set: PlaneSet, seq: Long, ptsUs: Long) {
+        val start = System.nanoTime()
+        val y = set.y!!
+        val u = set.u!!
+        val v = set.v!!
+        try {
+            if (mode == EncodeMode.YUYV) {
+                val out = ByteArray(width * height * 2)
+                yuv420ToYuyv(width, height, y, u, v, out, rotate180)
+                deliver(seq, out, out.size, ptsUs, System.nanoTime() - start)
+            } else {
+                val b = buffers.get()!!
+                yuv420ToNv21(width, height, y, u, v, b.nv21!!, rotate180)
+                b.jpegOut.reset()
+                YuvImage(b.nv21, ImageFormat.NV21, width, height, null)
+                    .compressToJpeg(rect, JPEG_QUALITY, b.jpegOut)
+                deliver(seq, b.jpegOut.toByteArray(), b.jpegOut.size(), ptsUs,
+                    System.nanoTime() - start)
+            }
+        } finally {
+            synchronized(freeSets) { freeSets.addLast(set) }
+        }
+    }
+
+    private fun deliver(seq: Long, data: ByteArray, length: Int, ptsUs: Long, elapsedNs: Long) {
+        if (closed) {
+            return
+        }
+        while (true) {
+            val last = lastDelivered.get()
+            if (seq <= last) {
+                synchronized(statsLock) { statsOutOfOrder++ }
+                return
+            }
+            if (lastDelivered.compareAndSet(last, seq)) {
+                break
+            }
+        }
+        sink.onFrame(data, length, ptsUs)
+        recordStats(elapsedNs)
+    }
+
+    override fun close() {
+        closed = true
+        workers?.shutdown()
+    }
+
+    private fun recordStats(elapsedNs: Long) = synchronized(statsLock) {
         statsFrames++
         statsTotalNs += elapsedNs
         statsMaxNs = maxOf(statsMaxNs, elapsedNs)
@@ -334,15 +425,19 @@ private class FrameEncoder(
         if (now - statsSince >= STATS_PERIOD_NS) {
             val seconds = (now - statsSince) / 1e9
             Log.i(TAG, "Encode $mode ${width}x$height: " +
-                "%.1f fps, avg %.1f ms, max %.1f ms".format(
+                "%.1f fps, avg %.1f ms, max %.1f ms, busy drops %d, out of order %d".format(
                     statsFrames / seconds,
                     statsTotalNs / 1e6 / statsFrames,
                     statsMaxNs / 1e6,
+                    statsBusy,
+                    statsOutOfOrder,
                 ))
             statsSince = now
             statsFrames = 0
             statsTotalNs = 0
             statsMaxNs = 0
+            statsBusy = 0
+            statsOutOfOrder = 0
         }
     }
 
@@ -350,5 +445,8 @@ private class FrameEncoder(
         private const val TAG = "FrameEncoder"
         private const val JPEG_QUALITY = 85
         private const val STATS_PERIOD_NS = 5_000_000_000L
+
+        /** Software JPEG at 1080p takes ~39 ms on the OnePlus 15; two fit 30 fps. */
+        private const val WORKERS = 2
     }
 }

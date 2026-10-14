@@ -208,8 +208,17 @@ Pitfalls found:
 - [x] Camera choice (any Camera2 camera; default the first back camera)
       and a maximum resolution (1080p/720p/480p) in the UI, persisted;
       locked while the webcam is on, since changing them re-enumerates.
-- [ ] libjpeg-turbo (NEON) if `YuvImage` can't keep up at some size; not
-      needed so far.
+- [x] Rotation: sensor images are landscape and unrotated, and turning the
+      phone looks opposite to front and back cameras, so the correction for
+      a landscape mount (top to the left) is `sensor − 90` (back) or
+      `sensor + 90` (front): 0 for both OnePlus 15 cameras (back 90°, front
+      270°). A "Rotate 180°" setting covers an upside-down mount. The
+      camera's JPEG encoder can't rotate and this phone has no hardware
+      rotate-and-crop, so rotated MJPEG uses YUV → YuvImage.
+- [x] Software JPEG at 1080p takes ~38 ms per frame (25–26 fps on one
+      thread); `FrameEncoder` now encodes YUV frames on two worker threads
+      with recycled plane buffers and drops out-of-order results: 30.0 fps,
+      no busy drops, no out-of-order frames. libjpeg-turbo isn't needed.
 
 Verified on the OnePlus 15 with the Linux host (2026-10-13): MJPEG
 1920×1080@30 (hardware JPEG), MJPEG 1280×720@30 (YuvImage), YUYV
@@ -233,8 +242,10 @@ Screen off works, or the limitation is documented.
       transfer plus Windows' decode, buffering and display. The camera
       pipeline dominates, so the 150 ms target isn't reachable from our
       side; 210 ms is typical for a USB webcam with Windows Camera.
-      Follow-ups in Phase 4: compare the YUV path at 1080p with hardware
-      JPEG; log exposure time next to latency.
+      Front camera, 1080p: hardware JPEG ~105 ms capture → USB queue, YUV +
+      YuvImage on two threads ~97 ms; the camera's JPEG encoder adds about
+      8 ms but saves two cores, so it stays the default when no rotation is
+      needed. Follow-up: log exposure time next to latency.
 - [x] Screen off (Android 16, OnePlus 15): video keeps going. The camera
       dipped to 26.6 fps in the 5 s window where the screen turned off, then
       held 29.4–30 fps with no placeholder or failed frames. The foreground
