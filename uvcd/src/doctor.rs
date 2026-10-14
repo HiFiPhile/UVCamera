@@ -199,12 +199,18 @@ fn check_gadget(report: &mut Report, gadget: &Path, probe: bool) {
         .iter()
         .filter(|f| f.starts_with("uvc."))
         .collect::<Vec<_>>();
-    if !uvc.is_empty() {
+    if let Some(first) = uvc.first() {
         report.add(
             Status::Info,
             "existing uvc functions",
             format!("{uvc:?} (possibly the OEM DeviceAsWebcam feature)"),
         );
+        // Every UVC function has the same format groups; without --probe
+        // an existing one tells.
+        if !probe {
+            let streaming = gadget.join("functions").join(first).join("streaming");
+            report_framebased(report, streaming.join("framebased").is_dir());
+        }
     }
 
     let configs = gadget.join("configs");
@@ -250,6 +256,7 @@ fn probe_uvc_function(report: &mut Report, gadget: &Path) {
 
     let has_tree = path.join("control").is_dir() && path.join("streaming").is_dir();
     let attrs = dir_names(&path).unwrap_or_default().join(" ");
+    let framebased = path.join("streaming").join("framebased").is_dir();
 
     if let Err(e) = fs::remove_dir(&path) {
         report.add(
@@ -266,11 +273,26 @@ fn probe_uvc_function(report: &mut Report, gadget: &Path) {
             "uvc function probe",
             format!("supported ({attrs})"),
         );
+        report_framebased(report, framebased);
     } else {
         report.add(
             Status::Fail,
             "uvc function probe",
             format!("created but missing control/streaming: {attrs}"),
+        );
+    }
+}
+
+/// Whether the UVC function offers the frame-based format group (H.264 and
+/// other frame-based codecs), added to configfs in Linux 6.13.
+fn report_framebased(report: &mut Report, supported: bool) {
+    if supported {
+        report.add(Status::Info, "uvc frame-based format (H.264)", "supported");
+    } else {
+        report.add(
+            Status::Info,
+            "uvc frame-based format (H.264)",
+            "not supported (needs Linux 6.13+); MJPEG and YUYV only",
         );
     }
 }

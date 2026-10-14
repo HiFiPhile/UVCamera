@@ -313,8 +313,8 @@ Planned:
   this phone runs GKI 6.12 (its UVC function offers only `mjpeg` and
   `uncompressed`, bcdUVC 0x0110; the vendor init's `streaming/h264/h`
   link points at nothing). Expected on phones with the next GKI branch
-  (6.18). `uvcd doctor` should report it so the app can offer H.264 only
-  where the kernel supports it.
+  (6.18). `uvcd doctor` reports it ("uvc frame-based format
+  (H.264)"), so the app can offer H.264 only where the kernel supports it.
 - Microphone as UAC2 (`f_uac2`) so the phone is a webcam + mic.
 - Still image capture (method 2).
 
