@@ -8,13 +8,17 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.hardware.camera2.CameraManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -32,6 +36,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hifiphile.uvcamera.R
+import com.hifiphile.uvcamera.camera.CameraInfo
+import com.hifiphile.uvcamera.camera.Facing
+import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.Status
 import com.hifiphile.uvcamera.daemon.StreamParams
@@ -100,6 +107,8 @@ fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
                 )
             }
 
+            WebcamSettingsRows(locked = service.running)
+
             Row(
                 modifier = Modifier.padding(top = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -132,6 +141,73 @@ fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun facingLabel(facing: Facing) = stringResource(when (facing) {
+    Facing.BACK -> R.string.camera_facing_back
+    Facing.FRONT -> R.string.camera_facing_front
+    Facing.EXTERNAL -> R.string.camera_facing_external
+})
+
+/** Camera and resolution cap. Locked while running: changing them needs re-enumeration. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun WebcamSettingsRows(locked: Boolean) {
+    val context = LocalContext.current
+    val settings = remember { WebcamSettings(context) }
+    val cameras = remember {
+        runCatching { queryCameras(context.getSystemService(CameraManager::class.java)) }
+            .getOrDefault(emptyList())
+    }
+    var cameraId by remember {
+        mutableStateOf(WebcamSettings.pickCamera(cameras, settings.cameraId)?.id)
+    }
+    var maxResolution by remember { mutableStateOf(settings.maxResolution) }
+
+    Text(
+        stringResource(R.string.webcam_settings_camera),
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (camera: CameraInfo in cameras) {
+            FilterChip(
+                selected = camera.id == cameraId,
+                onClick = {
+                    cameraId = camera.id
+                    settings.cameraId = camera.id
+                },
+                enabled = !locked,
+                label = { Text(stringResource(R.string.webcam_camera_chip, camera.id, facingLabel(camera.facing))) },
+            )
+        }
+    }
+
+    Text(
+        stringResource(R.string.webcam_settings_max_resolution),
+        style = MaterialTheme.typography.labelLarge,
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (resolution in MaxResolution.entries) {
+            FilterChip(
+                selected = resolution == maxResolution,
+                onClick = {
+                    maxResolution = resolution
+                    settings.maxResolution = resolution
+                },
+                enabled = !locked,
+                label = { Text(resolution.label) },
+            )
+        }
+    }
+
+    if (locked) {
+        Text(
+            stringResource(R.string.webcam_settings_locked),
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 

@@ -21,16 +21,21 @@ private fun frame(size: Resolution, fps: List<Int>) =
     FrameSpec(size.width, size.height, fps.map(::fpsToInterval).sorted())
 
 /**
- * Formats to advertise for [camera]: the standard webcam sizes that it can
- * deliver at 30 fps, as hardware JPEG or as YUV for software encoding. Falls
- * back to the daemon's defaults if the camera reports nothing usable.
+ * Formats to advertise for [camera]: the standard webcam sizes up to
+ * [maxHeight] that it can deliver at 30 fps, as hardware JPEG or as YUV for
+ * software encoding. Falls back to the daemon's defaults if the camera
+ * reports nothing usable.
  */
-fun webcamFormats(camera: CameraInfo): List<FormatSpec> {
+fun webcamFormats(camera: CameraInfo, maxHeight: Int = Int.MAX_VALUE): List<FormatSpec> {
     val yuv = camera.streamableSizes[StreamFormat.YUV].orEmpty().toSet()
     val jpeg = camera.streamableSizes[StreamFormat.JPEG].orEmpty().toSet()
 
-    val mjpeg = MJPEG_SIZES.filter { it in yuv || it in jpeg }.map { frame(it, MJPEG_FPS) }
-    val yuyv = YUYV_FRAMES.filter { (size, _) -> size in yuv }.map { (size, fps) -> frame(size, fps) }
+    val mjpeg = MJPEG_SIZES
+        .filter { it.height <= maxHeight && (it in yuv || it in jpeg) }
+        .map { frame(it, MJPEG_FPS) }
+    val yuyv = YUYV_FRAMES
+        .filter { (size, _) -> size.height <= maxHeight && size in yuv }
+        .map { (size, fps) -> frame(size, fps) }
 
     val formats = buildList {
         if (mjpeg.isNotEmpty()) add(FormatSpec(FormatKind.MJPEG, mjpeg))

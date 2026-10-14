@@ -17,7 +17,6 @@ import android.util.Log
 import com.hifiphile.uvcamera.MainActivity
 import com.hifiphile.uvcamera.R
 import com.hifiphile.uvcamera.camera.CameraStreamer
-import com.hifiphile.uvcamera.camera.Facing
 import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.Client
 import com.hifiphile.uvcamera.daemon.SourceChannel
@@ -130,16 +129,16 @@ class WebcamService : Service() {
 
     private fun run() {
         val manager = getSystemService(CameraManager::class.java)
+        val settings = WebcamSettings(this)
         val camera = try {
-            queryCameras(manager).let { cameras ->
-                cameras.firstOrNull { it.facing == Facing.BACK } ?: cameras.first()
-            }
+            WebcamSettings.pickCamera(queryCameras(manager), settings.cameraId)
+                ?: throw IllegalStateException("No cameras found")
         } catch (e: Exception) {
             Log.e(TAG, "No usable camera", e)
             _state.update { it.copy(error = e.toString()) }
             return
         }
-        val formats = webcamFormats(camera)
+        val formats = webcamFormats(camera, settings.maxResolution.height)
         val streamer = CameraStreamer(manager, camera.id)
         _state.update { it.copy(camera = "${camera.id} (${camera.facing.name.lowercase()})") }
         Log.i(TAG, "Using camera ${camera.id}, advertising $formats")

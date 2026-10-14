@@ -205,7 +205,9 @@ Pitfalls found:
       per-stream encoders: hardware JPEG where the camera supports the size
       at the rate, else YUV → `YuvImage` JPEG; YUV → YUYV for uncompressed.
       `FrameSender` keeps one pending frame (newest wins).
-- [ ] Camera choice (front/back) and resolution caps in the UI; persist.
+- [x] Camera choice (any Camera2 camera; default the first back camera)
+      and a maximum resolution (1080p/720p/480p) in the UI, persisted;
+      locked while the webcam is on, since changing them re-enumerates.
 - [ ] libjpeg-turbo (NEON) if `YuvImage` can't keep up at some size; not
       needed so far.
 
