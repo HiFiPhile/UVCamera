@@ -21,6 +21,48 @@ java {
     }
 }
 
+/**
+ * Version from `git describe`: release tags are `v<major>.<minor>`; [count]
+ * commits since the tag (or since the start, before the first tag).
+ */
+data class GitVersion(val major: Int, val minor: Int, val tag: String?, val count: Int, val hash: String) {
+    // 8 bits each for major, minor and commits since the tag, as in MSD.
+    val code: Int
+        get() {
+            require(major in 0..255 && minor in 0..255 && count in 0..255) { "Version out of range: $this" }
+            return major.shl(16) or minor.shl(8) or count
+        }
+
+    val name: String
+        get() = "$major.$minor" + if (count > 0) ".r$count.g$hash" else ""
+}
+
+fun git(vararg args: String): String = providers.exec {
+    commandLine("git", *args)
+    workingDir = rootDir
+}.standardOutput.asText.get().trim()
+
+val gitVersion = run {
+    val describe = providers.exec {
+        commandLine("git", "describe", "--long", "--tags", "--abbrev=7", "--match", "v[0-9]*")
+        workingDir = rootDir
+        isIgnoreExitValue = true
+    }
+    if (describe.result.get().exitValue == 0) {
+        // v<major>.<minor>-<count>-g<hash>
+        val match = Regex("""^(v(\d+)\.(\d+))-(\d+)-g([0-9a-f]+)$""")
+            .matchEntire(describe.standardOutput.asText.get().trim())
+            ?: throw GradleException("Tags must be v<major>.<minor>")
+        val (tag, major, minor, count, hash) = match.destructured
+        GitVersion(major.toInt(), minor.toInt(), tag, count.toInt(), hash)
+    } else {
+        GitVersion(0, 0, null, git("rev-list", "--count", "HEAD").toInt(), git("rev-parse", "--short=7", "HEAD"))
+    }
+}
+
+val projectUrl = "https://github.com/HiFiPhile/UVCamera"
+val releaseMetadataBranch = "master"
+
 val extraDir = layout.buildDirectory.map { it.dir("extra") }
 
 android {
@@ -34,14 +76,26 @@ android {
         applicationId = "com.hifiphile.uvcamera"
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = gitVersion.code
+        versionName = gitVersion.name
+    }
+    signingConfigs {
+        // From the environment, so the key never touches the repository.
+        create("release") {
+            val keystore = System.getenv("RELEASE_KEYSTORE")
+            storeFile = keystore?.let(::File)
+            storePassword = System.getenv("RELEASE_KEYSTORE_PASSPHRASE")
+            keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+            keyPassword = System.getenv("RELEASE_KEY_PASSPHRASE")
+        }
     }
     buildTypes {
         getByName("release") {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
@@ -140,7 +194,10 @@ androidComponents.onVariants { variant ->
     }
 
     val moduleProp = tasks.register("moduleProp$capitalized") {
+        inputs.property("projectUrl", projectUrl)
+        inputs.property("releaseMetadataBranch", releaseMetadataBranch)
         inputs.property("rootProject.name", rootProject.name)
+        inputs.property("variant.name", variant.name)
         inputs.property("variant.applicationId", variant.applicationId)
         inputs.property("variantVersionCode", variantVersionCode)
         inputs.property("variantVersionName", variantVersionName)
@@ -157,6 +214,11 @@ androidComponents.onVariants { variant ->
                 "author" to "HiFiPhile",
                 "description" to "Use the phone as a USB webcam via the kernel UVC gadget",
             )
+            // Root managers check this for module updates.
+            if (variant.name == "release") {
+                props["updateJson"] =
+                    "$projectUrl/raw/$releaseMetadataBranch/app/module/updates/${variant.name}/info.json"
+            }
 
             outputFile.get().asFile.writeText(
                 props.map { "${it.key}=${it.value}" }.joinToString("\n", postfix = "\n"))
@@ -173,7 +235,9 @@ androidComponents.onVariants { variant ->
         outputs.upToDateWhen { false }
         doLast {
             val signing = android.buildTypes.getByName(variant.name).signingConfig
-                ?: throw GradleException("No signing config for ${variant.name}")
+                ?.takeIf { it.storeFile != null }
+                ?: throw GradleException(
+                    "No signing key for ${variant.name}; set RELEASE_KEYSTORE and friends (docs/RELEASE.md)")
             val store = KeyStore.getInstance(signing.storeType ?: KeyStore.getDefaultType())
             signing.storeFile!!.inputStream().use {
                 store.load(it, signing.storePassword!!.toCharArray())
@@ -225,5 +289,35 @@ androidComponents.onVariants { variant ->
 
         from(File(rootDir, "LICENSE"))
         from(File(rootDir, "README.md"))
+    }
+
+    // The module update channel: run on the release tag, then commit the
+    // result to the metadata branch once the release is published.
+    tasks.register("updateJson$capitalized") {
+        inputs.property("projectUrl", projectUrl)
+        inputs.property("rootProject.name", rootProject.name)
+        inputs.property("variant.name", variant.name)
+        inputs.property("variantVersionCode", variantVersionCode)
+        inputs.property("variantVersionName", variantVersionName)
+
+        val updateDir = File(projectDir, "module/updates/${variant.name}")
+        outputs.dir(updateDir)
+
+        doLast {
+            val tag = gitVersion.tag
+            if (tag == null || gitVersion.count != 0) {
+                throw GradleException("Check out the release tag first")
+            }
+            val zip = "${rootProject.name}-${variantVersionName.get()}-${variant.name}.zip"
+            updateDir.mkdirs()
+            File(updateDir, "info.json").writeText("""
+                {
+                    "version": "v${variantVersionName.get()}",
+                    "versionCode": ${variantVersionCode.get()},
+                    "zipUrl": "$projectUrl/releases/download/$tag/$zip",
+                    "changelog": "$projectUrl/raw/$tag/CHANGELOG.md"
+                }
+            """.trimIndent() + "\n")
+        }
     }
 }

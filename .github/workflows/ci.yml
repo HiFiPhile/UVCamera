@@ -1,0 +1,54 @@
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Versions are derived from Git tags and commit history.
+          fetch-depth: 0
+
+      - name: Validate gradle wrapper checksum
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: 'temurin'
+          java-version: 21
+          cache: gradle
+
+      - name: Install cargo-android
+        run: cargo install --git https://github.com/chenxiaolong/cargo-android --tag v0.1.6
+
+      - name: Install toolchains
+        run: |
+          rustup target add aarch64-linux-android
+          rustup target add thumbv7neon-linux-androideabi
+          rustup target add x86_64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Test daemon
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Build and test app
+        # Debug build only since release builds require the signing key
+        run: ./gradlew --no-daemon build zipDebug -x assembleRelease
+
+      - name: Upload debug module
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: UVCamera-debug-module
+          path: app/build/distributions/debug/*.zip
+          if-no-files-found: error
+          retention-days: 14

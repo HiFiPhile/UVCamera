@@ -299,13 +299,17 @@ Done so far:
       video node after each rebind (~0.5 s) and the host reconnects. Where
       a switch drops every link, the daemon re-links once the gadget is
       bound again (~5 s; simulated by unlinking and rebinding with MTP).
+- [x] Release setup: versions from `v<major>.<minor>` tags, release signing
+      from the environment, `updateJson` channel, CI (build, tests, clippy,
+      cargo-deny) and a tag-triggered release workflow that verifies the
+      module against the committed certificate pin (docs/RELEASE.md).
+      Rehearsed with a throwaway key on a tagged clone.
 
 Planned:
 
 - memfd ring + `USERPTR`/`DMABUF` if profiling shows copy overhead.
 - In-app preview, per-host quirks, MSD coexistence test.
-- Release signing, `update.json` for module updates, GitHub Actions CI
-  (adapt MSD's `ci.yml`).
+- Release key and first tag (docs/RELEASE.md); publish the repository.
 
 ## Phase 5: stretch
 

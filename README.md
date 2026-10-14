@@ -106,6 +106,9 @@ on `PATH`, then:
 cargo test                                    # uvcd host unit tests
 ```
 
+Signed releases, the module update channel and CI are described in
+[docs/RELEASE.md](docs/RELEASE.md).
+
 ## License
 
 GPL-3.0-only. Portions are derived from MSD by Andrew Gunnerson.
