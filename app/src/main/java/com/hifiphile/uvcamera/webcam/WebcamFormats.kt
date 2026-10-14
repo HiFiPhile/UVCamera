@@ -6,6 +6,8 @@ package com.hifiphile.uvcamera.webcam
 import com.hifiphile.uvcamera.camera.CameraInfo
 import com.hifiphile.uvcamera.camera.Resolution
 import com.hifiphile.uvcamera.camera.StreamFormat
+import android.hardware.camera2.CameraMetadata
+import com.hifiphile.uvcamera.daemon.ControlCaps
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.FormatSpec
 import com.hifiphile.uvcamera.daemon.FrameSpec
@@ -43,3 +45,33 @@ fun webcamFormats(camera: CameraInfo, maxHeight: Int = Int.MAX_VALUE): List<Form
     }
     return formats.ifEmpty { FormatSpec.defaults() }
 }
+
+/**
+ * Controls to advertise for [camera]: zoom over its zoom ratio range, manual
+ * focus if it has a focus motor and can turn AF off, white balance if it has
+ * AWB presets to approximate a temperature, and power line frequency if it
+ * offers 50/60 Hz antibanding.
+ */
+fun webcamControls(camera: CameraInfo): ControlCaps {
+    val zoom = camera.zoomRatioRange
+        ?.takeIf { (lo, hi) -> hi > lo }
+        ?.let { (lo, hi) -> Math.round(lo * 100) to minOf(Math.round(hi * 100), 0xffff) }
+    val focus = camera.minFocusDistance > 0f &&
+        CameraMetadata.CONTROL_AF_MODE_OFF in camera.afModes &&
+        CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO in camera.afModes
+    val presets = camera.awbModes.count { it in AWB_PRESET_KELVIN }
+    val whiteBalance = CameraMetadata.CONTROL_AWB_MODE_AUTO in camera.awbModes && presets >= 2
+    val powerLine = CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_50HZ in camera.antibandingModes ||
+        CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_60HZ in camera.antibandingModes
+    return ControlCaps(zoom, focus, whiteBalance, powerLine)
+}
+
+/** Nominal colour temperature of each AWB preset. */
+val AWB_PRESET_KELVIN = mapOf(
+    CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT to 2700,
+    CameraMetadata.CONTROL_AWB_MODE_WARM_FLUORESCENT to 3000,
+    CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT to 4000,
+    CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT to 5500,
+    CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to 6500,
+    CameraMetadata.CONTROL_AWB_MODE_SHADE to 7500,
+)

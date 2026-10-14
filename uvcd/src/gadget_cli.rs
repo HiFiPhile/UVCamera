@@ -23,7 +23,10 @@ use crate::{
     gadget::{EndpointConfig, Gadget},
     session::{Original, Session, SessionConfig, teardown},
     source::SourceHub,
-    uvc::format::{FormatKind, FormatSpec},
+    uvc::{
+        controls::ControlCaps,
+        format::{FormatKind, FormatSpec},
+    },
 };
 
 /// What `up` changed, so `down` can undo it after a crash.
@@ -154,6 +157,8 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
         gadget.clone(),
         SessionConfig {
             specs: build_specs(&cli.stream.formats, &cli.stream.mjpeg_fps),
+            // The test pattern has nothing to control beyond brightness.
+            controls: ControlCaps::default(),
             endpoint: EndpointConfig {
                 maxpacket: cli.maxpacket,
                 maxburst: cli.stream.maxburst,

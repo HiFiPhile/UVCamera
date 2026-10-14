@@ -8,14 +8,54 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
-// Daemon protocol, version 3. Mirrors uvcd/src/message.rs, which documents
+// Daemon protocol, version 4. Mirrors uvcd/src/message.rs, which documents
 // the wire format. All integers are little endian.
 
-const val PROTOCOL_VERSION = 3
+const val PROTOCOL_VERSION = 4
 
-/** Brightness control id; values 0..255, 128 meaning no change. */
-const val CONTROL_BRIGHTNESS = 1
+/** Control ids, as uvcd's `ControlId::wire`. */
+object ControlIds {
+    /** 0..255, 128 = no change. */
+    const val BRIGHTNESS = 1
+    /** Zoom ratio in hundredths. */
+    const val ZOOM = 2
+    const val FOCUS_AUTO = 3
+    /** 0 = nearest .. [FOCUS_MAX] = infinity. */
+    const val FOCUS = 4
+    const val WHITE_BALANCE_AUTO = 5
+    /** Kelvin, [WB_MIN]..[WB_MAX]. */
+    const val WHITE_BALANCE_TEMPERATURE = 6
+    /** 0 off, 1 50 Hz, 2 60 Hz, 3 auto. */
+    const val POWER_LINE_FREQUENCY = 7
+
+    const val FOCUS_MAX = 1000
+    const val WB_MIN = 2800
+    const val WB_MAX = 6500
+}
+
 const val BRIGHTNESS_DEFAULT = 128
+
+/** Optional controls the camera supports, advertised to the host. */
+data class ControlCaps(
+    /** Zoom range in hundredths, e.g. 60 to 1000 for 0.6x..10x. */
+    val zoom: Pair<Int, Int>? = null,
+    val focus: Boolean = false,
+    val whiteBalance: Boolean = false,
+    val powerLine: Boolean = false,
+) {
+    fun write(out: Writer) {
+        var flags = 0
+        if (zoom != null) flags = flags or 1
+        if (focus) flags = flags or 2
+        if (whiteBalance) flags = flags or 4
+        if (powerLine) flags = flags or 8
+        out.u8(flags)
+        zoom?.let { (min, max) ->
+            out.u16(min)
+            out.u16(max)
+        }
+    }
+}
 const val SOCKET_NAME = "uvcamerad"
 
 enum class FormatKind(val wire: Int) {
@@ -98,7 +138,11 @@ sealed interface Request {
         override fun write(out: Writer) = out.u8(1)
     }
 
-    data class Enable(val maxburst: Int, val formats: List<FormatSpec>) : Request {
+    data class Enable(
+        val maxburst: Int,
+        val formats: List<FormatSpec>,
+        val controls: ControlCaps = ControlCaps(),
+    ) : Request {
         override fun write(out: Writer) {
             out.u8(2)
             out.u8(maxburst)
@@ -113,6 +157,7 @@ sealed interface Request {
                     frame.intervals.forEach(out::u32)
                 }
             }
+            controls.write(out)
         }
     }
 
@@ -157,7 +202,7 @@ sealed interface SourceEvent {
     /** The host stopped streaming; release the camera. */
     data class StreamStop(val streamId: Int) : SourceEvent
 
-    /** The host changed camera control [control] (e.g. [CONTROL_BRIGHTNESS]) to [value]. */
+    /** The host changed camera control [control] (one of [ControlIds]) to [value]. */
     data class Control(val control: Int, val value: Int) : SourceEvent
 
     companion object {

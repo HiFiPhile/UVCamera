@@ -17,6 +17,7 @@ use tracing::{debug, warn};
 
 use crate::uvc::{
     EntityIds,
+    controls::ControlCaps,
     format::{Format, FormatSpec, FormatTable, Frame},
 };
 
@@ -196,9 +197,22 @@ impl Gadget {
         &self,
         specs: &[FormatSpec],
         endpoint: &EndpointConfig,
+        controls: &ControlCaps,
     ) -> Result<(FormatTable, EntityIds)> {
         let f = self.function_dir();
         mkdir(&f)?;
+
+        // Advertise the controls the camera supports. Writable since Linux
+        // 6.x (the OnePlus 15's 6.12 GKI allows it).
+        let bitmap = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b}\n")).collect::<String>();
+        write_attr(
+            &f.join("control/terminal/camera/default/bmControls"),
+            &bitmap(controls.camera_terminal_bm_controls()),
+        )?;
+        write_attr(
+            &f.join("control/processing/default/bmControls"),
+            &bitmap(controls.processing_unit_bm_controls()),
+        )?;
 
         write_attr(
             &f.join("streaming_maxpacket"),

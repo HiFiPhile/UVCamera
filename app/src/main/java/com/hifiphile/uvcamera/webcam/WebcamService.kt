@@ -19,7 +19,6 @@ import com.hifiphile.uvcamera.R
 import com.hifiphile.uvcamera.camera.CameraStreamer
 import com.hifiphile.uvcamera.camera.Transform
 import com.hifiphile.uvcamera.camera.queryCameras
-import com.hifiphile.uvcamera.daemon.CONTROL_BRIGHTNESS
 import com.hifiphile.uvcamera.daemon.Client
 import com.hifiphile.uvcamera.daemon.SourceChannel
 import com.hifiphile.uvcamera.daemon.SourceEvent
@@ -145,13 +144,14 @@ class WebcamService : Service() {
             return
         }
         val formats = webcamFormats(camera, settings.maxResolution.height)
+        val controls = webcamControls(camera)
         fun currentTransform() = WebcamSettings.transformFor(
             camera, settings.rotation, settings.mirrorH, settings.mirrorV)
         transform = currentTransform()
         val streamer = CameraStreamer(manager, camera.id)
         _state.update { it.copy(camera = "${camera.id} (${camera.facing.name.lowercase()})") }
         Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
-            "$transform), advertising $formats")
+            "$transform), advertising $formats and $controls")
 
         // Rotation and mirroring apply live; the camera and formats don't.
         val listener = settings.onTransformChanged {
@@ -166,7 +166,7 @@ class WebcamService : Service() {
                 Client().use { client ->
                     // Re-enabling would re-enumerate the device on the host.
                     if (!client.getStatus().enabled) {
-                        client.enable(formats)
+                        client.enable(formats, controls)
                     }
                 }
                 val client = Client()
@@ -216,10 +216,8 @@ class WebcamService : Service() {
                         )
                     }
                     is SourceEvent.Control -> {
-                        if (event.control == CONTROL_BRIGHTNESS) {
-                            Log.i(TAG, "Host set brightness ${event.value}")
-                            streamer.setBrightness(event.value)
-                        }
+                        Log.i(TAG, "Host set control ${event.control} to ${event.value}")
+                        streamer.setControl(event.control, event.value)
                     }
                     is SourceEvent.StreamStop -> {
                         Log.i(TAG, "Host stopped stream ${event.streamId}")

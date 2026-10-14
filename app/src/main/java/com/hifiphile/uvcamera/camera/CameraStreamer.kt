@@ -11,6 +11,7 @@ import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
@@ -22,9 +23,10 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
-import com.hifiphile.uvcamera.daemon.BRIGHTNESS_DEFAULT
+import com.hifiphile.uvcamera.daemon.ControlIds
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.StreamParams
+import com.hifiphile.uvcamera.webcam.AWB_PRESET_KELVIN
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.util.ArrayDeque
@@ -128,6 +130,35 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
             }
         }
 
+        /** Zoom ratio for a UVC zoom value in hundredths, within the camera's range. */
+        fun zoomRatio(value: Int, lower: Float, upper: Float): Float =
+            (value / 100f).coerceIn(lower, upper)
+
+        /**
+         * Focus distance in diopters for a UVC focus value: 0 is the nearest
+         * the lens can focus ([minFocusDiopters]), [ControlIds.FOCUS_MAX] is
+         * infinity (0 diopters).
+         */
+        fun focusDiopters(value: Int, minFocusDiopters: Float): Float =
+            minFocusDiopters * (1f - value.coerceIn(0, ControlIds.FOCUS_MAX).toFloat() / ControlIds.FOCUS_MAX)
+
+        /** The available AWB preset whose nominal temperature is closest to [kelvin]. */
+        fun awbPreset(kelvin: Int, available: List<Int>, presets: Map<Int, Int>): Int =
+            presets.filterKeys { it in available }
+                .minByOrNull { (_, k) -> Math.abs(k - kelvin) }
+                ?.key ?: CameraMetadata.CONTROL_AWB_MODE_AUTO
+
+        /** AE antibanding mode for a UVC power line frequency value. */
+        fun antibanding(value: Int, available: List<Int>): Int {
+            val mode = when (value) {
+                0 -> CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_OFF
+                1 -> CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_50HZ
+                2 -> CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_60HZ
+                else -> CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
+            }
+            return if (mode in available) mode else CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
+        }
+
         /**
          * The AE target range for [fps]: exactly [fps, fps] if offered, else
          * the narrowest range topping out at [fps], else any containing it.
@@ -157,28 +188,61 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     private var encoder: FrameEncoder? = null
     private var active: Active? = null
     private var requestBuilder: CaptureRequest.Builder? = null
-    private var aeCompensationRange: Range<Int>? = null
+    private val chars by lazy { manager.getCameraCharacteristics(cameraId) }
 
-    /** Host brightness, applied as AE compensation; kept across camera restarts. */
-    private var brightness = BRIGHTNESS_DEFAULT
+    /**
+     * Control values the host set ([ControlIds] to value); kept across camera
+     * restarts. Unset controls keep the camera's defaults.
+     */
+    private val controls = mutableMapOf<Int, Int>()
 
-    /** Apply the host's brightness control, now and to future streams. */
-    fun setBrightness(value: Int) {
+    /** Apply a host control, now and to future streams. */
+    fun setControl(id: Int, value: Int) {
         handler.post {
-            brightness = value
+            controls[id] = value
             val builder = requestBuilder ?: return@post
             val session = session ?: return@post
-            applyBrightness(builder)
+            applyControls(builder)
             session.setSingleRepeatingRequest(builder.build(), executor,
                 object : CameraCaptureSession.CaptureCallback() {})
         }
     }
 
-    private fun applyBrightness(builder: CaptureRequest.Builder) {
-        val range = aeCompensationRange ?: return
-        val compensation = brightnessToCompensation(brightness, range.lower, range.upper)
-        builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, compensation)
-        Log.i(TAG, "Brightness $brightness -> AE compensation $compensation (range $range)")
+    /** Turn the host's control values into capture request settings. */
+    private fun applyControls(builder: CaptureRequest.Builder) {
+        controls[ControlIds.BRIGHTNESS]?.let { b ->
+            chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)?.let { range ->
+                builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                    brightnessToCompensation(b, range.lower, range.upper))
+            }
+        }
+        controls[ControlIds.ZOOM]?.let { z ->
+            chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let { range ->
+                builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio(z, range.lower, range.upper))
+            }
+        }
+        if (controls[ControlIds.FOCUS_AUTO] == 0) {
+            val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE,
+                focusDiopters(controls[ControlIds.FOCUS] ?: ControlIds.FOCUS_MAX, minFocus))
+        } else if (controls.containsKey(ControlIds.FOCUS_AUTO)) {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+        }
+        if (controls[ControlIds.WHITE_BALANCE_AUTO] == 0) {
+            val available = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList().orEmpty()
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, awbPreset(
+                controls[ControlIds.WHITE_BALANCE_TEMPERATURE] ?: 5000, available,
+                AWB_PRESET_KELVIN))
+        } else if (controls.containsKey(ControlIds.WHITE_BALANCE_AUTO)) {
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        }
+        controls[ControlIds.POWER_LINE_FREQUENCY]?.let { p ->
+            val available = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)
+                ?.toList().orEmpty()
+            builder.set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, antibanding(p, available))
+        }
+        Log.i(TAG, "Controls: $controls")
     }
 
     /** Start (or restart) producing frames in [params] with [transform]. */
@@ -320,8 +384,6 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                     }
                     session = s
 
-                    aeCompensationRange =
-                        chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
                     // PREVIEW rather than RECORD: it is tuned for latency, and
                     // video stabilization would buffer several frames.
                     val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -343,8 +405,8 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                             set(CaptureRequest.JPEG_ORIENTATION, 0)
                         }
                     }
-                    if (brightness != BRIGHTNESS_DEFAULT) {
-                        applyBrightness(builder)
+                    if (controls.isNotEmpty()) {
+                        applyControls(builder)
                     }
                     requestBuilder = builder
                     val request = builder.build()

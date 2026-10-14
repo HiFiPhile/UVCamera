@@ -173,10 +173,13 @@ impl Daemon {
             warn!("Previous session failed: {e:?}");
         }
 
+        // Control values belong to a session (and its camera).
+        self.source.reset_controls();
         *session = Some(Session::start(
             self.gadget.clone(),
             SessionConfig {
                 specs: request.formats.clone(),
+                controls: request.controls,
                 endpoint: EndpointConfig {
                     maxpacket: MAXPACKET,
                     maxburst: request.maxburst.into(),

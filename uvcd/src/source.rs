@@ -10,6 +10,7 @@
 //! timeout so a stuck app can never stall the USB stream.
 
 use std::{
+    collections::BTreeMap,
     io::{self, Write},
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
@@ -24,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     message::{Frame, SourceEvent},
-    uvc::{BRIGHTNESS_DEF, Control, StreamParams},
+    uvc::{Control, StreamParams, controls::ControlId},
 };
 
 const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
@@ -44,8 +45,8 @@ struct Inner {
     /// Newest frame for the current stream that the stream thread hasn't
     /// taken yet.
     pending: Option<(Frame, Instant)>,
-    /// Brightness the host set, if any.
-    brightness: Option<i16>,
+    /// Control values the host set in the current session.
+    controls: BTreeMap<ControlId, i32>,
 }
 
 impl Inner {
@@ -113,8 +114,13 @@ impl SourceHub {
         info!("Frame source {id} attached");
 
         // Bring the new source up to date.
-        if let Some(value) = inner.brightness {
-            inner.send(&SourceEvent::Control(Control::Brightness(value)));
+        let controls: Vec<_> = inner
+            .controls
+            .iter()
+            .map(|(&id, &value)| Control { id, value })
+            .collect();
+        for control in controls {
+            inner.send(&SourceEvent::Control(control));
         }
         if let Some((stream_id, params)) = inner.stream {
             inner.send(&SourceEvent::StreamStart { stream_id, params });
@@ -151,19 +157,25 @@ impl SourceHub {
     /// The host changed a control: remember it and tell the source.
     pub fn control_changed(&self, control: Control) {
         let mut inner = self.inner.lock().unwrap();
-        match control {
-            Control::Brightness(v) => inner.brightness = Some(v),
-        }
+        inner.controls.insert(control.id, control.value);
         inner.send(&SourceEvent::Control(control));
+    }
+
+    /// Forget control values, e.g. when the webcam is enabled again with
+    /// possibly another camera.
+    pub fn reset_controls(&self) {
+        self.inner.lock().unwrap().controls.clear();
     }
 
     /// Current control values, for restoring them when the video node is
     /// reopened.
     pub fn controls(&self) -> Vec<Control> {
         let inner = self.inner.lock().unwrap();
-        vec![Control::Brightness(
-            inner.brightness.unwrap_or(BRIGHTNESS_DEF),
-        )]
+        inner
+            .controls
+            .iter()
+            .map(|(&id, &value)| Control { id, value })
+            .collect()
     }
 
     /// The host stopped streaming.

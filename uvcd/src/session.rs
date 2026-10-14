@@ -24,6 +24,7 @@ use crate::{
     stream::{Exit, StreamStatus, Streamer},
     uvc::{
         EntityIds, Protocol,
+        controls::ControlCaps,
         format::{FormatSpec, FormatTable},
     },
     v4l2::{Speed, VideoDevice},
@@ -35,6 +36,8 @@ const NODE_WAIT: Duration = Duration::from_secs(5);
 pub struct SessionConfig {
     pub specs: Vec<FormatSpec>,
     pub endpoint: EndpointConfig,
+    /// Optional controls to advertise.
+    pub controls: ControlCaps,
     /// Controller to bind; the gadget's current one by default.
     pub udc: Option<String>,
     /// Raise the controller's IRQ thread to real-time priority while
@@ -100,7 +103,8 @@ impl Session {
         };
 
         let attach = || -> Result<(FormatTable, EntityIds)> {
-            let (table, entities) = gadget.create_function(&config.specs, &config.endpoint)?;
+            let (table, entities) =
+                gadget.create_function(&config.specs, &config.endpoint, &config.controls)?;
             info!("Created UVC function: {table:?}");
 
             // The UDC must be unbound to change the config. This briefly
@@ -129,6 +133,7 @@ impl Session {
         let thread = {
             let server = Server {
                 gadget: gadget.clone(),
+                controls: config.controls,
                 table,
                 entities,
                 endpoint: config.endpoint,
@@ -202,6 +207,7 @@ impl Drop for Session {
 /// What the stream thread needs.
 struct Server {
     gadget: Gadget,
+    controls: ControlCaps,
     table: FormatTable,
     entities: EntityIds,
     endpoint: EndpointConfig,
@@ -237,6 +243,7 @@ impl Server {
                 self.table.clone(),
                 self.entities,
                 self.endpoint.max_payload(Speed::High),
+                self.controls,
             );
             // Keep host-set controls across rebinds.
             for control in self.source.controls() {

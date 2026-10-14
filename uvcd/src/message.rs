@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 HiFiPhile
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Daemon protocol, version 3. Mirrored by the app's `daemon/Message.kt`.
+//! Daemon protocol, version 4. Mirrored by the app's `daemon/Message.kt`.
 //!
 //! After connecting, the client sends the protocol version (u8) and the
 //! daemon answers 1 (accepted) or 0. Then the client sends requests and
@@ -10,10 +10,13 @@
 //!
 //! ```text
 //! Request  := 1 GetStatus
-//!           | 2 Enable  maxburst:u8 count:u8 FormatSpec*
+//!           | 2 Enable  maxburst:u8 count:u8 FormatSpec* ControlCaps
 //!           | 3 Disable
 //!           | 4 AttachSource
 //! FormatSpec := kind:u8 count:u8 (width:u16 height:u16 count:u8 interval:u32*)*
+//! ControlCaps := flags:u8 [zoom_min:u16 zoom_max:u16]
+//!   flags: 1 zoom (followed by its range in hundredths), 2 focus,
+//!          4 white balance, 8 power line frequency
 //! Response := 0 Error   message:string
 //!           | 1 Status  enabled:u8 speed:u8 streaming:u8 [StreamParams]
 //!                       fps_milli:u32 source_fps_milli:u32 failed:u32
@@ -37,8 +40,11 @@
 //! The app produces frames in the format of the latest `StreamStart` and
 //! tags them with its `stream_id`; frames for any other id are dropped.
 //! `Control` carries a camera control the host changed (and the current
-//! values when the source attaches): control 1 is brightness, 0..=255 with
-//! 128 meaning no change.
+//! values when the source attaches). Control ids are those of
+//! [`ControlId::wire`]: 1 brightness (0..=255, 128 = no change), 2 zoom
+//! (hundredths), 3 focus auto, 4 focus (0 nearest .. 1000 infinity), 5 white
+//! balance auto, 6 white balance temperature (K), 7 power line frequency
+//! (0 off, 1 50 Hz, 2 60 Hz, 3 auto).
 
 use std::io::{self, Read, Write};
 
@@ -48,12 +54,13 @@ use crate::{
     stream::StreamStatus,
     uvc::{
         Control, StreamParams,
+        controls::{ControlCaps, ControlId},
         format::{FormatKind, FormatSpec, FrameSpec},
     },
     v4l2::Speed,
 };
 
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 /// Abstract Unix socket name.
 pub const SOCKET_NAME: &str = "uvcamerad";
 
@@ -211,6 +218,57 @@ fn speed_to_u8(speed: Option<Speed>) -> u8 {
 pub struct EnableRequest {
     pub maxburst: u8,
     pub formats: Vec<FormatSpec>,
+    pub controls: ControlCaps,
+}
+
+const CAP_ZOOM: u8 = 1;
+const CAP_FOCUS: u8 = 2;
+const CAP_WHITE_BALANCE: u8 = 4;
+const CAP_POWER_LINE: u8 = 8;
+
+fn read_control_caps(r: &mut impl Read) -> io::Result<ControlCaps> {
+    let flags = r.read_u8()?;
+    if flags & !(CAP_ZOOM | CAP_FOCUS | CAP_WHITE_BALANCE | CAP_POWER_LINE) != 0 {
+        return Err(invalid(format!("Unknown control flags: {flags:#x}")));
+    }
+    let zoom = if flags & CAP_ZOOM != 0 {
+        let min = r.read_u16::<LittleEndian>()?;
+        let max = r.read_u16::<LittleEndian>()?;
+        if min == 0 || min > max {
+            return Err(invalid(format!("Invalid zoom range: {min}..{max}")));
+        }
+        Some((min, max))
+    } else {
+        None
+    };
+    Ok(ControlCaps {
+        zoom,
+        focus: flags & CAP_FOCUS != 0,
+        white_balance: flags & CAP_WHITE_BALANCE != 0,
+        power_line: flags & CAP_POWER_LINE != 0,
+    })
+}
+
+fn write_control_caps(w: &mut impl Write, c: &ControlCaps) -> io::Result<()> {
+    let mut flags = 0;
+    if c.zoom.is_some() {
+        flags |= CAP_ZOOM;
+    }
+    if c.focus {
+        flags |= CAP_FOCUS;
+    }
+    if c.white_balance {
+        flags |= CAP_WHITE_BALANCE;
+    }
+    if c.power_line {
+        flags |= CAP_POWER_LINE;
+    }
+    w.write_u8(flags)?;
+    if let Some((min, max)) = c.zoom {
+        w.write_u16::<LittleEndian>(min)?;
+        w.write_u16::<LittleEndian>(max)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +298,12 @@ impl Request {
                     }
                     formats.push(spec);
                 }
-                Ok(Self::Enable(EnableRequest { maxburst, formats }))
+                let controls = read_control_caps(r)?;
+                Ok(Self::Enable(EnableRequest {
+                    maxburst,
+                    formats,
+                    controls,
+                }))
             }
             3 => Ok(Self::Disable),
             4 => Ok(Self::AttachSource),
@@ -255,7 +318,8 @@ impl Request {
                 w.write_u8(2)?;
                 w.write_u8(e.maxburst)?;
                 write_count(w, e.formats.len())?;
-                e.formats.iter().try_for_each(|f| write_format_spec(w, f))
+                e.formats.iter().try_for_each(|f| write_format_spec(w, f))?;
+                write_control_caps(w, &e.controls)
             }
             Self::Disable => w.write_u8(3),
             Self::AttachSource => w.write_u8(4),
@@ -369,12 +433,9 @@ impl SourceEvent {
             3 => {
                 let id = r.read_u8()?;
                 let value = r.read_i32::<LittleEndian>()?;
-                match id {
-                    1 => Ok(Self::Control(Control::Brightness(
-                        i16::try_from(value).map_err(|_| invalid("Brightness out of range"))?,
-                    ))),
-                    _ => Err(invalid(format!("Unknown control: {id}"))),
-                }
+                let id = ControlId::from_wire(id)
+                    .ok_or_else(|| invalid(format!("Unknown control: {id}")))?;
+                Ok(Self::Control(Control { id, value }))
             }
             id => Err(invalid(format!("Unknown source event: {id}"))),
         }
@@ -391,10 +452,10 @@ impl SourceEvent {
                 w.write_u8(2)?;
                 w.write_u32::<LittleEndian>(*stream_id)
             }
-            Self::Control(Control::Brightness(value)) => {
+            Self::Control(Control { id, value }) => {
                 w.write_u8(3)?;
-                w.write_u8(1)?;
-                w.write_i32::<LittleEndian>(i32::from(*value))
+                w.write_u8(id.wire())?;
+                w.write_i32::<LittleEndian>(*value)
             }
         }
     }
@@ -473,6 +534,12 @@ mod tests {
                 FormatSpec::default_for(FormatKind::Mjpeg).with_fps(&[60, 30]),
                 FormatSpec::default_for(FormatKind::Yuyv),
             ],
+            controls: ControlCaps {
+                zoom: Some((60, 1000)),
+                focus: true,
+                white_balance: true,
+                power_line: true,
+            },
         });
         for r in [
             Request::GetStatus,
@@ -522,15 +589,21 @@ mod tests {
                 kind: FormatKind::Mjpeg,
                 frames: vec![FrameSpec::new(640, 480, &[30])],
             }],
+            controls: ControlCaps {
+                zoom: Some((60, 1000)),
+                focus: true,
+                white_balance: false,
+                power_line: true,
+            },
         });
         let mut buf = vec![];
         enable.write_to(&mut buf).unwrap();
-        assert_eq!(
-            buf,
-            [
-                2, 2, 1, 0, 1, 0x80, 0x02, 0xe0, 0x01, 1, 0x15, 0x16, 0x05, 0x00
-            ]
-        );
+        // Formats, then control flags 1|2|8 and the zoom range 60..1000.
+        #[rustfmt::skip]
+        assert_eq!(buf, [
+            2, 2, 1, 0, 1, 0x80, 0x02, 0xe0, 0x01, 1, 0x15, 0x16, 0x05, 0x00,
+            0x0b, 60, 0, 0xe8, 0x03,
+        ]);
 
         let status = Response::Status(Status {
             enabled: true,
@@ -573,7 +646,10 @@ mod tests {
                 params,
             },
             SourceEvent::StreamStop { stream_id: 7 },
-            SourceEvent::Control(Control::Brightness(200)),
+            SourceEvent::Control(Control {
+                id: ControlId::Brightness,
+                value: 200,
+            }),
         ] {
             let mut buf = vec![];
             e.write_to(&mut buf).unwrap();
@@ -582,9 +658,12 @@ mod tests {
 
         // Same bytes as the app's MessageTest.kt.
         let mut buf = vec![];
-        SourceEvent::Control(Control::Brightness(200))
-            .write_to(&mut buf)
-            .unwrap();
+        SourceEvent::Control(Control {
+            id: ControlId::Brightness,
+            value: 200,
+        })
+        .write_to(&mut buf)
+        .unwrap();
         assert_eq!(buf, [3, 1, 200, 0, 0, 0]);
 
         let frame = Frame {
@@ -609,6 +688,21 @@ mod tests {
             Frame::read_from(&mut &[1u8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2][..])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_invalid_control_caps() {
+        let spec = [0u8, 1, 0x80, 2, 0xe0, 1, 1, 0x15, 0x16, 0x05, 0x00];
+        let enable = |caps: &[u8]| {
+            let mut b = vec![2, 0, 1];
+            b.extend_from_slice(&spec);
+            b.extend_from_slice(caps);
+            Request::read_from(&mut b.as_slice())
+        };
+        assert!(enable(&[0]).is_ok());
+        assert!(enable(&[0x10]).is_err(), "unknown flag");
+        assert!(enable(&[1, 0, 0, 0xe8, 3]).is_err(), "zoom min 0");
+        assert!(enable(&[1, 0xe8, 3, 60, 0]).is_err(), "zoom min > max");
     }
 
     #[test]

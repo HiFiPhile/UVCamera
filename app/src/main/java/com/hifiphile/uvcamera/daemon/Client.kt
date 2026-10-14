@@ -60,8 +60,8 @@ class Client : Closeable {
         else -> throw IOException("Unexpected response: $r")
     }
 
-    fun enable(formats: List<FormatSpec>, maxburst: Int = 0) =
-        expectOk(request(Request.Enable(maxburst, formats)))
+    fun enable(formats: List<FormatSpec>, controls: ControlCaps = ControlCaps(), maxburst: Int = 0) =
+        expectOk(request(Request.Enable(maxburst, formats, controls)))
 
     fun disable() = expectOk(request(Request.Disable))
 

@@ -176,6 +176,7 @@ pub fn subcommand_client(cli: &ClientCli) -> Result<()> {
             expect_ok(client.request(&Request::Enable(EnableRequest {
                 maxburst: opts.maxburst as u8,
                 formats: build_specs(&opts.formats, &opts.mjpeg_fps),
+                controls: Default::default(),
             }))?)
         }
         ClientCommand::Disable => expect_ok(client.request(&Request::Disable)?),

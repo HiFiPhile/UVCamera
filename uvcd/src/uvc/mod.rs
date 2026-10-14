@@ -10,11 +10,17 @@
 //! stage arrives later as `UVC_EVENT_DATA`. [`Protocol`] turns those into
 //! replies and tracks the PROBE/COMMIT negotiation.
 
+pub mod controls;
 pub mod format;
+
+use std::collections::BTreeMap;
 
 use tracing::debug;
 
-use self::format::{Format, FormatKind, FormatTable, Frame, Interval};
+use self::{
+    controls::{ControlCaps, ControlId, ControlRange, Unit},
+    format::{Format, FormatKind, FormatTable, Frame, Interval},
+};
 
 // wIndex low byte after the kernel's fixup.
 const INTERFACE_CONTROL: u8 = 0;
@@ -33,20 +39,16 @@ pub const GET_DEF: u8 = 0x87;
 // Control selectors.
 const VC_REQUEST_ERROR_CODE_CONTROL: u8 = 0x02;
 const CT_AE_MODE_CONTROL: u8 = 0x02;
-const PU_BRIGHTNESS_CONTROL: u8 = 0x02;
 const VS_PROBE_CONTROL: u8 = 0x01;
 const VS_COMMIT_CONTROL: u8 = 0x02;
 
 // GET_INFO bits.
 const INFO_GET_SET: u8 = 0x03;
 const INFO_GET: u8 = 0x01;
+const INFO_DISABLED_BY_AUTO: u8 = 0x04;
 
 // AE mode bitmap: auto mode only.
 const AE_MODE_AUTO: u8 = 0x02;
-
-pub const BRIGHTNESS_MIN: i16 = 0;
-pub const BRIGHTNESS_MAX: i16 = 255;
-pub const BRIGHTNESS_DEF: i16 = 128;
 
 /// dwClockFrequency reported in the UVC 1.1 probe structure (48 MHz, the
 /// value f_uvc puts in the control header).
@@ -199,12 +201,11 @@ pub struct StreamParams {
     pub max_frame_size: u32,
 }
 
-/// A camera control the host can set, forwarded to the frame source.
+/// A camera control value the host set, forwarded to the frame source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Control {
-    /// Processing unit brightness, [`BRIGHTNESS_MIN`]..=[`BRIGHTNESS_MAX`],
-    /// default [`BRIGHTNESS_DEF`].
-    Brightness(i16),
+pub struct Control {
+    pub id: ControlId,
+    pub value: i32,
 }
 
 /// What a host-to-device data stage changed.
@@ -221,7 +222,7 @@ pub enum DataOutcome {
 enum Pending {
     Probe,
     Commit,
-    Brightness,
+    Control(ControlId),
     AeMode,
 }
 
@@ -250,15 +251,24 @@ pub struct Protocol {
     commit: StreamingControl,
     pending: Option<Pending>,
     error_code: ErrorCode,
-    brightness: i16,
+    /// Exposed controls and their current values.
+    ranges: BTreeMap<ControlId, ControlRange>,
+    values: BTreeMap<ControlId, i32>,
 }
 
 impl Protocol {
     /// `max_payload` is the isochronous endpoint's bytes per service interval
     /// at the connected speed, reported as dwMaxPayloadTransferSize.
-    pub fn new(formats: FormatTable, entities: EntityIds, max_payload: u32) -> Self {
+    pub fn new(
+        formats: FormatTable,
+        entities: EntityIds,
+        max_payload: u32,
+        controls: ControlCaps,
+    ) -> Self {
         let (format, frame) = formats.first();
         let default = Self::fill(format, frame, frame.spec.default_interval(), max_payload);
+        let ranges = controls.ranges();
+        let values = ranges.iter().map(|(&id, r)| (id, r.def)).collect();
 
         Self {
             formats,
@@ -268,7 +278,8 @@ impl Protocol {
             commit: default,
             pending: None,
             error_code: ErrorCode::None,
-            brightness: BRIGHTNESS_DEF,
+            ranges,
+            values,
         }
     }
 
@@ -373,8 +384,12 @@ impl Protocol {
 
     /// Restore a control value, e.g. when the video node is reopened.
     pub fn set_control(&mut self, control: Control) {
-        match control {
-            Control::Brightness(v) => self.brightness = v,
+        if self
+            .ranges
+            .get(&control.id)
+            .is_some_and(|r| r.contains(control.value))
+        {
+            self.values.insert(control.id, control.value);
         }
     }
 
@@ -393,16 +408,18 @@ impl Protocol {
                 debug!(commit = ?self.commit, "Commit");
                 DataOutcome::Committed
             }
-            Some(Pending::Brightness) if data.len() >= 2 => {
-                let value = i16::from_le_bytes([data[0], data[1]]);
-                if !(BRIGHTNESS_MIN..=BRIGHTNESS_MAX).contains(&value) {
-                    self.error_code = ErrorCode::OutOfRange;
-                    DataOutcome::None
-                } else if value == self.brightness {
-                    DataOutcome::None
-                } else {
-                    self.brightness = value;
-                    DataOutcome::ControlChanged(Control::Brightness(value))
+            Some(Pending::Control(id)) => {
+                let value = id.decode(data).filter(|&v| self.ranges[&id].contains(v));
+                match value {
+                    None => {
+                        self.error_code = ErrorCode::OutOfRange;
+                        DataOutcome::None
+                    }
+                    Some(v) if self.values.get(&id) == Some(&v) => DataOutcome::None,
+                    Some(value) => {
+                        self.values.insert(id, value);
+                        DataOutcome::ControlChanged(Control { id, value })
+                    }
                 }
             }
             Some(Pending::AeMode) if !data.is_empty() => {
@@ -468,7 +485,7 @@ impl Protocol {
 
     fn handle_camera_terminal(&mut self, req: &CtrlRequest) -> Reply {
         if req.selector() != CT_AE_MODE_CONTROL {
-            return self.fail(ErrorCode::InvalidControl);
+            return self.handle_control(Unit::CameraTerminal, req);
         }
 
         match req.request {
@@ -482,23 +499,40 @@ impl Protocol {
     }
 
     fn handle_processing_unit(&mut self, req: &CtrlRequest) -> Reply {
-        if req.selector() != PU_BRIGHTNESS_CONTROL {
+        self.handle_control(Unit::ProcessingUnit, req)
+    }
+
+    /// GET/SET of a control from the [`ControlCaps`] table.
+    fn handle_control(&mut self, unit: Unit, req: &CtrlRequest) -> Reply {
+        let Some(id) = ControlId::from_selector(unit, req.selector())
+            .filter(|id| self.ranges.contains_key(id))
+        else {
             return self.fail(ErrorCode::InvalidControl);
-        }
+        };
+        let range = self.ranges[&id];
 
         let value = match req.request {
-            SET_CUR => return self.receive(Pending::Brightness),
-            GET_CUR => self.brightness,
-            GET_MIN => BRIGHTNESS_MIN,
-            GET_MAX => BRIGHTNESS_MAX,
-            GET_RES => 1,
-            GET_DEF => BRIGHTNESS_DEF,
-            GET_LEN => 2,
-            GET_INFO => return self.ok(vec![INFO_GET_SET]),
+            SET_CUR => return self.receive(Pending::Control(id)),
+            GET_CUR => self.values[&id],
+            GET_MIN => range.min,
+            GET_MAX => range.max,
+            GET_RES => range.res,
+            GET_DEF => range.def,
+            GET_LEN => return self.ok((id.len() as u16).to_le_bytes().to_vec()),
+            GET_INFO => {
+                // Tell the host a manual control is disabled while its auto
+                // control is on (UVC 1.5 table 4-3, D2).
+                let auto_on = id
+                    .auto_control()
+                    .is_some_and(|auto| self.values.get(&auto) == Some(&1));
+                return self.ok(vec![
+                    INFO_GET_SET | if auto_on { INFO_DISABLED_BY_AUTO } else { 0 },
+                ]);
+            }
             _ => return self.fail(ErrorCode::InvalidRequest),
         };
 
-        self.ok(value.to_le_bytes().to_vec())
+        self.ok(id.encode(value))
     }
 }
 
@@ -508,6 +542,8 @@ mod tests {
         format::{FormatSpec, FrameSpec},
         *,
     };
+
+    const PU_BRIGHTNESS_CONTROL: u8 = 0x02;
 
     const PAYLOAD: u32 = 3072;
 
@@ -520,7 +556,7 @@ mod tests {
             },
         ])
         .unwrap();
-        Protocol::new(table, EntityIds::default(), PAYLOAD)
+        Protocol::new(table, EntityIds::default(), PAYLOAD, ControlCaps::default())
     }
 
     fn req(request_type: u8, request: u8, selector: u8, index: u16, length: u16) -> CtrlRequest {
@@ -670,7 +706,10 @@ mod tests {
         );
         assert_eq!(
             p.handle_data(&200i16.to_le_bytes()),
-            DataOutcome::ControlChanged(Control::Brightness(200))
+            DataOutcome::ControlChanged(Control {
+                id: ControlId::Brightness,
+                value: 200
+            })
         );
         // Setting the same value again is not a change.
         p.handle_setup(&set(PU_BRIGHTNESS_CONTROL, pu));
@@ -701,6 +740,88 @@ mod tests {
         assert_eq!(
             data(p.handle_setup(&error)),
             vec![ErrorCode::InvalidUnit as u8]
+        );
+    }
+
+    #[test]
+    fn advertised_controls_get_set_and_auto_info() {
+        let table = FormatTable::from_specs(&[FormatSpec::default_for(FormatKind::Mjpeg)]).unwrap();
+        let caps = ControlCaps {
+            zoom: Some((60, 1000)),
+            focus: true,
+            white_balance: true,
+            power_line: true,
+        };
+        let mut p = Protocol::new(table, EntityIds::default(), PAYLOAD, caps);
+        let ct = 1 << 8;
+        let pu = 2 << 8;
+        let get2 = |r, sel, idx| req(0xa1, r, sel, idx, 2);
+
+        // Zoom: range from the camera, default 1x.
+        assert_eq!(
+            data(p.handle_setup(&get2(GET_MIN, 0x0b, ct))),
+            60u16.to_le_bytes()
+        );
+        assert_eq!(
+            data(p.handle_setup(&get2(GET_MAX, 0x0b, ct))),
+            1000u16.to_le_bytes()
+        );
+        assert_eq!(
+            data(p.handle_setup(&get2(GET_CUR, 0x0b, ct))),
+            100u16.to_le_bytes()
+        );
+        assert_eq!(
+            p.handle_setup(&req(0x21, SET_CUR, 0x0b, ct, 2)),
+            Reply::Receive
+        );
+        assert_eq!(
+            p.handle_data(&300u16.to_le_bytes()),
+            DataOutcome::ControlChanged(Control {
+                id: ControlId::Zoom,
+                value: 300
+            })
+        );
+        p.handle_setup(&req(0x21, SET_CUR, 0x0b, ct, 2));
+        assert_eq!(p.handle_data(&2000u16.to_le_bytes()), DataOutcome::None);
+        assert_eq!(
+            data(p.handle_setup(&get2(GET_CUR, 0x0b, ct))),
+            300u16.to_le_bytes()
+        );
+
+        // Focus is disabled while autofocus is on (default), enabled after.
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_INFO, 0x06, ct, 1))),
+            vec![0x07]
+        );
+        p.handle_setup(&req(0x21, SET_CUR, 0x08, ct, 1));
+        p.handle_data(&[0]);
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_INFO, 0x06, ct, 1))),
+            vec![0x03]
+        );
+
+        // Processing unit: 1-byte power line, 2-byte WB temperature.
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_DEF, 0x05, pu, 1))),
+            vec![3]
+        );
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_LEN, 0x05, pu, 2))),
+            vec![1, 0]
+        );
+        assert_eq!(
+            data(p.handle_setup(&get2(GET_RES, 0x0a, pu))),
+            100u16.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn unadvertised_controls_stall() {
+        let mut p = protocol();
+        // Zoom isn't in the default caps.
+        assert_eq!(
+            p.handle_setup(&req(0xa1, GET_CUR, 0x0b, 1 << 8, 2)),
+            Reply::Stall
         );
     }
 
@@ -750,7 +871,7 @@ mod tests {
             FormatSpec::default_for(FormatKind::Yuyv),
         ])
         .unwrap();
-        let mut p = Protocol::new(table, EntityIds::default(), PAYLOAD);
+        let mut p = Protocol::new(table, EntityIds::default(), PAYLOAD, ControlCaps::default());
 
         let r = |t, r, v, i, l| CtrlRequest {
             request_type: t,
@@ -838,7 +959,7 @@ mod tests {
             FormatSpec::default_for(FormatKind::Yuyv),
         ])
         .unwrap();
-        let mut p = Protocol::new(table, EntityIds::default(), PAYLOAD);
+        let mut p = Protocol::new(table, EntityIds::default(), PAYLOAD, ControlCaps::default());
 
         let r = |t, r, v, i, l| CtrlRequest {
             request_type: t,

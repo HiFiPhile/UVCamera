@@ -16,12 +16,19 @@ class MessageTest {
     @Test
     fun enableRequestMatchesDaemonEncoding() {
         val out = ByteArrayOutputStream()
-        Request.Enable(2, listOf(
-            FormatSpec(FormatKind.MJPEG, listOf(FrameSpec(640, 480, listOf(333_333)))),
-        )).write(Writer(out))
+        Request.Enable(
+            2,
+            listOf(FormatSpec(FormatKind.MJPEG, listOf(FrameSpec(640, 480, listOf(333_333))))),
+            ControlCaps(zoom = 60 to 1000, focus = true, powerLine = true),
+        ).write(Writer(out))
 
+        // Same bytes as uvcd's message.rs: formats, then control flags 1|2|8
+        // and the zoom range.
         assertArrayEquals(
-            bytes(2, 2, 1, 0, 1, 0x80, 0x02, 0xe0, 0x01, 1, 0x15, 0x16, 0x05, 0x00),
+            bytes(
+                2, 2, 1, 0, 1, 0x80, 0x02, 0xe0, 0x01, 1, 0x15, 0x16, 0x05, 0x00,
+                0x0b, 60, 0, 0xe8, 0x03,
+            ),
             out.toByteArray(),
         )
     }
@@ -73,7 +80,7 @@ class MessageTest {
         )
         // Same bytes as uvcd's message.rs.
         assertEquals(
-            SourceEvent.Control(CONTROL_BRIGHTNESS, 200),
+            SourceEvent.Control(ControlIds.BRIGHTNESS, 200),
             SourceEvent.read(Reader(ByteArrayInputStream(bytes(3, 1, 200, 0, 0, 0)))),
         )
     }

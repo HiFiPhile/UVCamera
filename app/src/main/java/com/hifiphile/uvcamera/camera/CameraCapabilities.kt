@@ -33,6 +33,13 @@ data class CameraInfo(
     val sensorOrientation: Int,
     /** Per format, sizes that can sustain [TARGET_FRAME_DURATION_NS], largest first. */
     val streamableSizes: Map<StreamFormat, List<Resolution>>,
+    /** CONTROL_ZOOM_RATIO_RANGE, e.g. 0.6 to 10 on a logical multi-camera. */
+    val zoomRatioRange: Pair<Float, Float>? = null,
+    /** Nearest focus distance in diopters; 0 for fixed focus. */
+    val minFocusDistance: Float = 0f,
+    val afModes: List<Int> = emptyList(),
+    val awbModes: List<Int> = emptyList(),
+    val antibandingModes: List<Int> = emptyList(),
 )
 
 /** 30 fps, the baseline frame rate every advertised UVC frame size must meet. */
@@ -87,5 +94,12 @@ fun queryCameras(manager: CameraManager): List<CameraInfo> = manager.cameraIdLis
             chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)),
         sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
         streamableSizes = sizes,
+        zoomRatioRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            ?.let { it.lower to it.upper },
+        minFocusDistance = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+        afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList().orEmpty(),
+        awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList().orEmpty(),
+        antibandingModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)
+            ?.toList().orEmpty(),
     )
 }
