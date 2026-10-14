@@ -161,14 +161,29 @@ MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
   | `YUV_420_888` → YUYV repack | Uncompressed | a few ms | YUYV streams; USB 2.0 limits it to 640×480@30 |
   | MediaCodec AVC | H.264 (UVC 1.5 frame-based) | HW | Phase 5; needs `streaming/framebased` |
 
-- **Rotation:** sensor images arrive unrotated. For a landscape mount (top
+- **Orientation:** sensor images arrive unrotated. For a landscape mount (top
   of the phone to the left) the correction is `sensor − 90°` for back
   cameras and `sensor + 90°` for front cameras, since turning the phone looks
-  opposite to each; on the OnePlus 15 (90°/270°) neither needs a turn. A
-  "Rotate 180°" setting covers an upside-down mount. Only 0° and 180° are
-  supported (a 90° turn wouldn't fit a landscape frame). The camera's JPEG
-  encoder can't rotate, so rotated MJPEG uses the YUV path, which rotates
-  during conversion for free.
+  opposite to each; on the OnePlus 15 (90°/270°) neither needs a turn. The
+  user adds 0/90/180/270° and left/right, up/down mirroring on top.
+  `YuvTransform` rotates, mirrors and center-crops during the YUV
+  conversion (each output row is a straight walk through the source); for
+  quarter turns the capture size is the smallest that covers the output
+  (1080p → 2560×1920). The camera's JPEG encoder can't transform, so any
+  transform uses the YUV path. Changes apply live: the encoder swaps
+  transforms when the capture size still fits, otherwise the camera
+  restarts on the same host stream.
+- **Controls:** host control values arrive as `Control` events and map to
+  Camera2: brightness → AE compensation, zoom → `CONTROL_ZOOM_RATIO`, focus
+  → AF off + `LENS_FOCUS_DISTANCE`, power line → AE antibanding, white
+  balance temperature → `COLOR_CORRECTION_MODE_CCT` (Android 16), else
+  gains from the sensor calibration (DNG method), else the nearest AWB
+  preset. Controls are advertised for all cameras together, and each camera
+  clamps or skips what it lacks.
+- **Live camera switch:** another camera with the same formats reopens on
+  the host's current stream with the host's control values (~110 ms, a few
+  repeated frames). A change of formats (resolution cap) re-enables the
+  daemon, which the host sees as a replug.
 - **FrameSender:** one pending frame per source connection, so a slow socket
   drops stale frames instead of adding latency.
 
@@ -236,17 +251,20 @@ only newer kernels have.
 
 ## IPC protocol
 
-Abstract Unix stream socket `@uvcamerad`, protocol version 2 (`message.rs`,
+Abstract Unix stream socket `@uvcamerad`, protocol version 4 (`message.rs`,
 mirrored by `Message.kt`, with golden-byte tests on both sides). After a
 version handshake, a connection carries tagged little-endian messages in
 MSD's style. Malformed input closes the connection.
 
 - **Control connection:** request/response. `GetStatus` → `Status` (enabled,
   host link speed, current stream, fps sent, fps received from the app,
-  failed frames), `Enable(maxburst, formats)`, `Disable`.
+  failed frames), `Enable(maxburst, formats, controls)`, `Disable`. The
+  control capabilities (zoom range, focus, white balance, power line) set
+  the units' `bmControls`; brightness is always offered.
 - **Source connection:** a second connection sends `AttachSource` and then
-  carries frames. The daemon sends `StreamStart(stream_id, params)` and
-  `StreamStop(stream_id)`. The app sends `Frame(stream_id, pts_us, bytes)`,
+  carries frames. The daemon sends `StreamStart(stream_id, params)`,
+  `StreamStop(stream_id)` and `Control(id, value)`; on attach it replays
+  the current control values and stream. The app sends `Frame(stream_id, pts_us, bytes)`,
   where `pts_us` is the sensor capture time in CLOCK_MONOTONIC (for latency
   stats). Frames for an old `stream_id` are dropped, so a format switch
   can't show stale frames. Frames are authorized once at attach, not per
@@ -297,14 +315,14 @@ configfs.
   class becomes Misc/IAD (`0xEF/0x02/0x01`) so Windows binds the UVC
   interface association correctly. The original values are restored on
   disable.
-- **Gadget HAL:** `SIGSTOP`ped while reconfiguring (MSD's approach), then
-  resumed. If the user changes the USB mode in Settings, the HAL may unlink
-  our function. The daemon watches for this (inotify on `configs/b.1` / UDC
-  state) and re-applies *(Phase 4)*. Devices without a gadget HAL
+- **USB mode changes:** devices without a gadget HAL
   (`vendor.usb.use_gadget_hal=0`, e.g. Qualcomm/OnePlus) reconfigure through
-  init property triggers instead. Those only remove the `f1…f9` links, so a
-  uniquely named link survives mode switches. See the device notes in
-  PLAN.md.
+  init property triggers, which only remove the `f1…f9` links, so our
+  uniquely named link survives; the daemon reopens the video node after the
+  rebind. If a switch drops our link (a gadget HAL rebuilding the config),
+  the daemon re-links once the gadget is bound again. Pausing a gadget HAL
+  (`SIGSTOP`, MSD's approach) while we reconfigure is not implemented yet:
+  the test phone has none. See the device notes in PLAN.md.
 - **MSD side by side:** both link distinct names into `b.1` and pause the HAL
   the same way. This should compose but needs testing.
 - **Camera contention:** if another app takes the camera
