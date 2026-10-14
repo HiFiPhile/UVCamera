@@ -27,6 +27,24 @@ class YuvConvertTest {
     }
 
     @Test
+    fun nv21Rotated() {
+        val out = ByteArray(4 * 2 * 3 / 2)
+        yuv420ToNv21(4, 2, y, u, v, out, rotate180 = true)
+        // Luma reversed (rows and columns); the single chroma row reversed by pair.
+        assertArrayEquals(bytes(8, 7, 6, 5, 4, 3, 2, 1, 21, 11, 20, 10), out)
+    }
+
+    @Test
+    fun yuyvRotated() {
+        val out = ByteArray(4 * 2 * 2)
+        yuv420ToYuyv(4, 2, y, u, v, out, rotate180 = true)
+        assertArrayEquals(
+            bytes(8, 11, 7, 21, 6, 10, 5, 20, 4, 11, 3, 21, 2, 10, 1, 20),
+            out,
+        )
+    }
+
+    @Test
     fun yuyv() {
         val out = ByteArray(4 * 2 * 2)
         yuv420ToYuyv(4, 2, y, u, v, out)

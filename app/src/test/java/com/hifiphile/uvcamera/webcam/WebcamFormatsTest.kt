@@ -17,6 +17,7 @@ class WebcamFormatsTest {
         id = "0",
         facing = Facing.BACK,
         hardwareLevel = "FULL",
+        sensorOrientation = 90,
         streamableSizes = mapOf(StreamFormat.JPEG to jpeg, StreamFormat.YUV to yuv),
     )
 
@@ -61,6 +62,16 @@ class WebcamFormatsTest {
         assertEquals("0", WebcamSettings.pickCamera(listOf(front, back), null)?.id)
         assertEquals("0", WebcamSettings.pickCamera(listOf(front, back), "9")?.id)
         assertEquals("1", WebcamSettings.pickCamera(listOf(front), null)?.id)
+    }
+
+    @Test
+    fun rotationNormalizesSensorsThenAppliesUserFlip() {
+        val back = camera(emptyList(), emptyList())
+        val front = back.copy(id = "1", facing = Facing.FRONT, sensorOrientation = 270)
+        assertEquals(false, WebcamSettings.needsRotate180(back, userRotate180 = false))
+        assertEquals(true, WebcamSettings.needsRotate180(front, userRotate180 = false))
+        assertEquals(true, WebcamSettings.needsRotate180(back, userRotate180 = true))
+        assertEquals(false, WebcamSettings.needsRotate180(front, userRotate180 = true))
     }
 
     @Test

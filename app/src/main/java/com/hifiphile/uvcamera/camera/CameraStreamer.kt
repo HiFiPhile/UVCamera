@@ -54,10 +54,16 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         private const val JPEG_QUALITY = 85
         private const val MAX_IMAGES = 3
 
-        /** Pick how to produce frames in [params] with this camera. */
-        fun chooseMode(chars: CameraCharacteristics, params: StreamParams): EncodeMode {
+        /**
+         * Pick how to produce frames in [params] with this camera. The camera's
+         * JPEG encoder can't rotate, so a rotated MJPEG stream goes through YUV.
+         */
+        fun chooseMode(chars: CameraCharacteristics, params: StreamParams, rotate180: Boolean): EncodeMode {
             if (params.kind == FormatKind.YUYV) {
                 return EncodeMode.YUYV
+            }
+            if (rotate180) {
+                return EncodeMode.YUV_JPEG
             }
 
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -85,17 +91,17 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
-    private var active: StreamParams? = null
+    private var active: Pair<StreamParams, Boolean>? = null
 
-    /** Start (or restart) producing frames in [params]. */
-    fun start(params: StreamParams, sink: FrameSink, onError: (String) -> Unit) {
+    /** Start (or restart) producing frames in [params], rotated by 180° if [rotate180]. */
+    fun start(params: StreamParams, rotate180: Boolean, sink: FrameSink, onError: (String) -> Unit) {
         handler.post {
-            if (active == params) {
+            if (active == params to rotate180) {
                 return@post
             }
             closeCamera()
             try {
-                openCamera(params, sink, onError)
+                openCamera(params, rotate180, sink, onError)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start camera", e)
                 closeCamera()
@@ -117,20 +123,25 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     }
 
     @SuppressLint("MissingPermission") // Checked before the service starts.
-    private fun openCamera(params: StreamParams, sink: FrameSink, onError: (String) -> Unit) {
+    private fun openCamera(
+        params: StreamParams,
+        rotate180: Boolean,
+        sink: FrameSink,
+        onError: (String) -> Unit,
+    ) {
         val chars = manager.getCameraCharacteristics(cameraId)
-        val mode = chooseMode(chars, params)
+        val mode = chooseMode(chars, params, rotate180)
         val fps = Math.round(params.fps).toInt()
-        Log.i(TAG, "Starting camera $cameraId: $params via $mode")
+        Log.i(TAG, "Starting camera $cameraId: $params via $mode, rotate180=$rotate180")
 
         val format = if (mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
         val reader = ImageReader.newInstance(params.width, params.height, format, MAX_IMAGES)
         val realtimeTimestamps = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
         reader.setOnImageAvailableListener(
-            FrameEncoder(mode, params, realtimeTimestamps, sink), handler)
+            FrameEncoder(mode, params, rotate180, realtimeTimestamps, sink), handler)
         this.reader = reader
-        active = params
+        active = params to rotate180
 
         manager.openCamera(cameraId, executor, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
@@ -243,6 +254,7 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
 private class FrameEncoder(
     private val mode: EncodeMode,
     params: StreamParams,
+    private val rotate180: Boolean,
     /** Image timestamps are in the elapsedRealtime (boot time) clock. */
     private val realtimeTimestamps: Boolean,
     private val sink: FrameSink,
@@ -258,6 +270,12 @@ private class FrameEncoder(
     private val nv21 = if (mode == EncodeMode.YUV_JPEG) ByteArray(width * height * 3 / 2) else null
     private val rect = Rect(0, 0, width, height)
 
+    // Encode cost, logged every STATS_PERIOD_NS.
+    private var statsSince = System.nanoTime()
+    private var statsFrames = 0
+    private var statsTotalNs = 0L
+    private var statsMaxNs = 0L
+
     override fun onImageAvailable(reader: ImageReader) {
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
         // Capture time in CLOCK_MONOTONIC (System.nanoTime), as the protocol
@@ -271,6 +289,7 @@ private class FrameEncoder(
             now / 1000
         }
 
+        val start = System.nanoTime()
         image.use {
             when (mode) {
                 EncodeMode.HW_JPEG -> {
@@ -291,10 +310,10 @@ private class FrameEncoder(
 
                     if (mode == EncodeMode.YUYV) {
                         val out = ByteArray(width * height * 2)
-                        yuv420ToYuyv(width, height, y, u, v, out)
+                        yuv420ToYuyv(width, height, y, u, v, out, rotate180)
                         sink.onFrame(out, out.size, ptsUs)
                     } else {
-                        yuv420ToNv21(width, height, y, u, v, nv21!!)
+                        yuv420ToNv21(width, height, y, u, v, nv21!!, rotate180)
                         jpegOut.reset()
                         YuvImage(nv21, ImageFormat.NV21, width, height, null)
                             .compressToJpeg(rect, JPEG_QUALITY, jpegOut)
@@ -303,9 +322,33 @@ private class FrameEncoder(
                 }
             }
         }
+        recordStats(System.nanoTime() - start)
+    }
+
+    private fun recordStats(elapsedNs: Long) {
+        statsFrames++
+        statsTotalNs += elapsedNs
+        statsMaxNs = maxOf(statsMaxNs, elapsedNs)
+
+        val now = System.nanoTime()
+        if (now - statsSince >= STATS_PERIOD_NS) {
+            val seconds = (now - statsSince) / 1e9
+            Log.i(TAG, "Encode $mode ${width}x$height: " +
+                "%.1f fps, avg %.1f ms, max %.1f ms".format(
+                    statsFrames / seconds,
+                    statsTotalNs / 1e6 / statsFrames,
+                    statsMaxNs / 1e6,
+                ))
+            statsSince = now
+            statsFrames = 0
+            statsTotalNs = 0
+            statsMaxNs = 0
+        }
     }
 
     companion object {
+        private const val TAG = "FrameEncoder"
         private const val JPEG_QUALITY = 85
+        private const val STATS_PERIOD_NS = 5_000_000_000L
     }
 }

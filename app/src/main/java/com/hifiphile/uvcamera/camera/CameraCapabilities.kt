@@ -29,6 +29,8 @@ data class CameraInfo(
     val id: String,
     val facing: Facing,
     val hardwareLevel: String,
+    /** Clockwise rotation of the sensor image relative to the phone's natural (portrait) orientation. */
+    val sensorOrientation: Int,
     /** Per format, sizes that can sustain [TARGET_FRAME_DURATION_NS], largest first. */
     val streamableSizes: Map<StreamFormat, List<Resolution>>,
 )
@@ -83,6 +85,7 @@ fun queryCameras(manager: CameraManager): List<CameraInfo> = manager.cameraIdLis
         facing = facing,
         hardwareLevel = hardwareLevelName(
             chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)),
+        sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
         streamableSizes = sizes,
     )
 }

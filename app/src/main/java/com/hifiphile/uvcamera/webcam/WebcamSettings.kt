@@ -24,6 +24,11 @@ class WebcamSettings(context: Context) {
         get() = prefs.getString(KEY_CAMERA_ID, null)
         set(value) = prefs.edit { putString(KEY_CAMERA_ID, value) }
 
+    /** Rotate the image by 180° on top of the per-camera correction (upside-down mount). */
+    var rotate180: Boolean
+        get() = prefs.getBoolean(KEY_ROTATE_180, false)
+        set(value) = prefs.edit { putBoolean(KEY_ROTATE_180, value) }
+
     var maxResolution: MaxResolution
         get() = prefs.getString(KEY_MAX_RESOLUTION, null)
             ?.let { name -> MaxResolution.entries.find { it.name == name } }
@@ -33,6 +38,17 @@ class WebcamSettings(context: Context) {
     companion object {
         private const val KEY_CAMERA_ID = "camera_id"
         private const val KEY_MAX_RESOLUTION = "max_resolution"
+        private const val KEY_ROTATE_180 = "rotate_180"
+
+        /**
+         * Whether frames from [camera] need a 180° turn so that every camera
+         * comes out upright with the phone in the same landscape position
+         * (top of the phone to the left, where 90° sensors such as most
+         * back cameras are upright), then flipped again for [userRotate180].
+         * Sensors mounted at 270° (most front cameras) need the turn.
+         */
+        fun needsRotate180(camera: CameraInfo, userRotate180: Boolean): Boolean =
+            (camera.sensorOrientation == 270) != userRotate180
 
         /** The chosen camera, or the first back camera, or any camera. */
         fun pickCamera(cameras: List<CameraInfo>, cameraId: String?): CameraInfo? =

@@ -139,9 +139,11 @@ class WebcamService : Service() {
             return
         }
         val formats = webcamFormats(camera, settings.maxResolution.height)
+        val rotate180 = WebcamSettings.needsRotate180(camera, settings.rotate180)
         val streamer = CameraStreamer(manager, camera.id)
         _state.update { it.copy(camera = "${camera.id} (${camera.facing.name.lowercase()})") }
-        Log.i(TAG, "Using camera ${camera.id}, advertising $formats")
+        Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
+            "rotate180=$rotate180), advertising $formats")
 
         while (!stopping) {
             try {
@@ -158,7 +160,7 @@ class WebcamService : Service() {
                     client.close()
                     throw e
                 }
-                serve(channel, streamer)
+                serve(channel, streamer, rotate180)
             } catch (e: Exception) {
                 if (stopping) {
                     break
@@ -173,7 +175,7 @@ class WebcamService : Service() {
     }
 
     /** Follow the host's streams until the channel closes. */
-    private fun serve(channel: SourceChannel, streamer: CameraStreamer) {
+    private fun serve(channel: SourceChannel, streamer: CameraStreamer, rotate180: Boolean) {
         this.channel = channel
         if (stopping) {
             channel.close()
@@ -191,6 +193,7 @@ class WebcamService : Service() {
                         _state.update { it.copy(streaming = event.params, error = null) }
                         streamer.start(
                             event.params,
+                            rotate180,
                             { data, length, ptsUs -> sender.offer(streamId, data, length, ptsUs) },
                             { error -> _state.update { it.copy(error = error) } },
                         )

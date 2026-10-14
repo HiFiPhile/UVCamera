@@ -165,6 +165,7 @@ private fun WebcamSettingsRows(locked: Boolean) {
         mutableStateOf(WebcamSettings.pickCamera(cameras, settings.cameraId)?.id)
     }
     var maxResolution by remember { mutableStateOf(settings.maxResolution) }
+    var rotate180 by remember { mutableStateOf(settings.rotate180) }
 
     Text(
         stringResource(R.string.webcam_settings_camera),
@@ -202,6 +203,20 @@ private fun WebcamSettingsRows(locked: Boolean) {
             )
         }
     }
+
+    FilterChip(
+        selected = rotate180,
+        onClick = {
+            rotate180 = !rotate180
+            settings.rotate180 = rotate180
+        },
+        enabled = !locked,
+        label = { Text(stringResource(R.string.webcam_settings_rotate_180)) },
+    )
+    Text(
+        stringResource(R.string.webcam_settings_orientation_hint),
+        style = MaterialTheme.typography.bodySmall,
+    )
 
     if (locked) {
         Text(
