@@ -38,12 +38,15 @@ enum class EncodeMode {
     /** The camera's hardware JPEG encoder: no CPU work per frame. */
     HW_JPEG,
 
-    /** YUV from the camera, compressed with YuvImage (libjpeg-turbo). */
+    /** YUV from the camera, transformed, compressed with YuvImage (libjpeg-turbo). */
     YUV_JPEG,
 
-    /** YUV from the camera, repacked to YUYV. */
+    /** YUV from the camera, transformed and repacked to YUYV. */
     YUYV,
 }
+
+/** Encoder and camera capture size for a stream. */
+data class CapturePlan(val mode: EncodeMode, val width: Int, val height: Int)
 
 /** Receives encoded frames: [length] bytes of [data], captured at [ptsUs]. */
 fun interface FrameSink {
@@ -52,7 +55,7 @@ fun interface FrameSink {
 
 /**
  * Runs one camera at a time for the host's current stream. All camera work
- * happens on a dedicated handler thread; [start] and [stop] may be called
+ * happens on a dedicated handler thread; the public methods may be called
  * from any thread.
  */
 class CameraStreamer(private val manager: CameraManager, private val cameraId: String) {
@@ -62,24 +65,55 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         private const val MAX_IMAGES = 3
 
         /**
-         * Pick how to produce frames in [params] with this camera. The camera's
-         * JPEG encoder can't rotate, so a rotated MJPEG stream goes through YUV.
+         * How to produce [params] with [transform]. The camera's JPEG encoder
+         * can't rotate or mirror, so any transform goes through YUV, captured
+         * large enough that the transformed image covers the output.
+         *
+         * @throws IllegalArgumentException if no capture size works
          */
-        fun chooseMode(chars: CameraCharacteristics, params: StreamParams, rotate180: Boolean): EncodeMode {
-            if (params.kind == FormatKind.YUYV) {
-                return EncodeMode.YUYV
-            }
-            if (rotate180) {
-                return EncodeMode.YUV_JPEG
+        fun plan(chars: CameraCharacteristics, params: StreamParams, transform: Transform): CapturePlan {
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?: throw IllegalArgumentException("Camera has no stream configurations")
+            val maxDuration = params.interval * 100L
+            fun fastEnough(format: Int, size: Size) =
+                map.getOutputMinFrameDuration(format, size) in 1..maxDuration
+
+            val out = Size(params.width, params.height)
+            if (params.kind == FormatKind.MJPEG && transform.isIdentity &&
+                map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
+                fastEnough(ImageFormat.JPEG, out)
+            ) {
+                return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height)
             }
 
-            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val size = Size(params.width, params.height)
-            val hwJpeg = map?.getOutputSizes(ImageFormat.JPEG)?.contains(size) == true &&
-                map.getOutputMinFrameDuration(ImageFormat.JPEG, size)
-                    .let { it in 1..params.interval * 100L }
-            return if (hwJpeg) EncodeMode.HW_JPEG else EncodeMode.YUV_JPEG
+            val mode = if (params.kind == FormatKind.YUYV) EncodeMode.YUYV else EncodeMode.YUV_JPEG
+            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
+                .filter { fastEnough(ImageFormat.YUV_420_888, it) }
+                .map { it.width to it.height }
+            val (w, h) = chooseCaptureSize(yuvSizes, params.width, params.height, transform)
+                ?: throw IllegalArgumentException(
+                    "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
+                        "with this camera")
+            return CapturePlan(mode, w, h)
         }
+
+        /**
+         * The smallest capture size whose transformed image covers the output:
+         * the output size itself for 0°/180° when available, and for 90°/270°
+         * one whose short side covers the output width (the center band of
+         * the rotated image is used, at full resolution).
+         */
+        fun chooseCaptureSize(
+            sizes: List<Pair<Int, Int>>,
+            outWidth: Int,
+            outHeight: Int,
+            transform: Transform,
+        ): Pair<Int, Int>? = sizes
+            .filter { (w, h) ->
+                val (rw, rh) = transform.rotatedSize(w, h)
+                rw >= outWidth && rh >= outHeight
+            }
+            .minByOrNull { (w, h) -> w.toLong() * h }
 
         /**
          * Map UVC brightness (0..255, 128 = no change) onto the camera's AE
@@ -104,6 +138,15 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                 ?: ranges.filter { fps in it }.minByOrNull { it.upper - it.lower }
     }
 
+    /** The stream being produced. */
+    private class Active(
+        val params: StreamParams,
+        var transform: Transform,
+        val plan: CapturePlan,
+        val sink: FrameSink,
+        val onError: (String) -> Unit,
+    )
+
     private val thread = HandlerThread("camera").apply { start() }
     private val handler = Handler(thread.looper)
     private val executor = Executor { handler.post(it) }
@@ -112,7 +155,7 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
     private var encoder: FrameEncoder? = null
-    private var active: Pair<StreamParams, Boolean>? = null
+    private var active: Active? = null
     private var requestBuilder: CaptureRequest.Builder? = null
     private var aeCompensationRange: Range<Int>? = null
 
@@ -138,19 +181,45 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         Log.i(TAG, "Brightness $brightness -> AE compensation $compensation (range $range)")
     }
 
-    /** Start (or restart) producing frames in [params], rotated by 180° if [rotate180]. */
-    fun start(params: StreamParams, rotate180: Boolean, sink: FrameSink, onError: (String) -> Unit) {
+    /** Start (or restart) producing frames in [params] with [transform]. */
+    fun start(params: StreamParams, transform: Transform, sink: FrameSink, onError: (String) -> Unit) {
         handler.post {
-            if (active == params to rotate180) {
+            val current = active
+            if (current != null && current.params == params && current.transform == transform) {
                 return@post
             }
             closeCamera()
-            try {
-                openCamera(params, rotate180, sink, onError)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start camera", e)
+            open(params, transform, sink, onError)
+        }
+    }
+
+    /**
+     * Change the transform while streaming. It takes effect at the next frame
+     * if the capture setup stays the same; otherwise only the camera restarts
+     * (the host's stream continues, briefly repeating the last frame).
+     */
+    fun setTransform(transform: Transform) {
+        handler.post {
+            val current = active ?: return@post
+            if (current.transform == transform) {
+                return@post
+            }
+            val newPlan = try {
+                plan(manager.getCameraCharacteristics(cameraId), current.params, transform)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Can't apply $transform", e)
+                current.onError(e.message ?: e.toString())
+                return@post
+            }
+
+            if (newPlan == current.plan) {
+                Log.i(TAG, "Applying $transform live")
+                current.transform = transform
+                encoder?.setTransform(transform)
+            } else {
+                Log.i(TAG, "Restarting camera for $transform ($newPlan)")
                 closeCamera()
-                onError(e.toString())
+                open(current.params, transform, current.sink, current.onError)
             }
         }
     }
@@ -167,27 +236,37 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
         }
     }
 
+    private fun open(params: StreamParams, transform: Transform, sink: FrameSink, onError: (String) -> Unit) {
+        try {
+            openCamera(params, transform, sink, onError)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start camera", e)
+            closeCamera()
+            onError(e.message ?: e.toString())
+        }
+    }
+
     @SuppressLint("MissingPermission") // Checked before the service starts.
     private fun openCamera(
         params: StreamParams,
-        rotate180: Boolean,
+        transform: Transform,
         sink: FrameSink,
         onError: (String) -> Unit,
     ) {
         val chars = manager.getCameraCharacteristics(cameraId)
-        val mode = chooseMode(chars, params, rotate180)
+        val plan = plan(chars, params, transform)
         val fps = Math.round(params.fps).toInt()
-        Log.i(TAG, "Starting camera $cameraId: $params via $mode, rotate180=$rotate180")
+        Log.i(TAG, "Starting camera $cameraId: $params with $transform via $plan")
 
-        val format = if (mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
-        val reader = ImageReader.newInstance(params.width, params.height, format, MAX_IMAGES)
+        val format = if (plan.mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
+        val reader = ImageReader.newInstance(plan.width, plan.height, format, MAX_IMAGES)
         val realtimeTimestamps = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
-        val encoder = FrameEncoder(mode, params, rotate180, realtimeTimestamps, sink)
+        val encoder = FrameEncoder(plan, params, transform, realtimeTimestamps, sink)
         reader.setOnImageAvailableListener(encoder, handler)
         this.encoder = encoder
         this.reader = reader
-        active = params to rotate180
+        active = Active(params, transform, plan, sink, onError)
 
         manager.openCamera(cameraId, executor, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
@@ -197,7 +276,7 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                     return
                 }
                 device = camera
-                createSession(camera, reader, chars, mode, fps, onError)
+                createSession(camera, reader, chars, plan.mode, fps, onError)
             }
 
             override fun onDisconnected(camera: CameraDevice) {
@@ -241,10 +320,10 @@ class CameraStreamer(private val manager: CameraManager, private val cameraId: S
                     }
                     session = s
 
-                    // PREVIEW rather than RECORD: it is tuned for latency, and
-                    // video stabilization would buffer several frames.
                     aeCompensationRange =
                         chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+                    // PREVIEW rather than RECORD: it is tuned for latency, and
+                    // video stabilization would buffer several frames.
                     val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(reader.surface)
                         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
@@ -331,28 +410,31 @@ private class WorkerBuffers(width: Int, height: Int, mode: EncodeMode) {
  *
  * Hardware JPEG frames are just copied, on the camera thread. YUV frames are
  * copied out of the image on the camera thread (so the camera can reuse it)
- * and converted/compressed on [WORKERS] threads: software JPEG at 1080p takes
- * longer than a frame interval on one core. Frames that finish out of order
- * are dropped so the host never goes backwards.
+ * and transformed/compressed on [WORKERS] threads: software JPEG at 1080p
+ * takes longer than a frame interval on one core. Frames that finish out of
+ * order are dropped so the host never goes backwards.
  */
 private class FrameEncoder(
-    private val mode: EncodeMode,
+    private val plan: CapturePlan,
     params: StreamParams,
-    private val rotate180: Boolean,
+    transform: Transform,
     /** Image timestamps are in the elapsedRealtime (boot time) clock. */
     private val realtimeTimestamps: Boolean,
     private val sink: FrameSink,
 ) : ImageReader.OnImageAvailableListener, Closeable {
+    private val mode = plan.mode
     private val width = params.width
     private val height = params.height
     private val rect = Rect(0, 0, width, height)
 
+    /** Swapped by [setTransform]; each frame uses whichever is current. */
+    @Volatile
+    private var xform = makeTransform(transform)
+
     private val workers = if (mode == EncodeMode.HW_JPEG) {
         null
     } else {
-        Executors.newFixedThreadPool(WORKERS) { r ->
-            Thread(r, "frame-encoder")
-        }
+        Executors.newFixedThreadPool(WORKERS) { r -> Thread(r, "frame-encoder") }
     }
     private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
 
@@ -375,6 +457,15 @@ private class FrameEncoder(
     private var statsMaxNs = 0L
     private var statsBusy = 0
     private var statsOutOfOrder = 0
+
+    private fun makeTransform(transform: Transform) =
+        if (mode == EncodeMode.HW_JPEG) null
+        else YuvTransform(plan.width, plan.height, width, height, transform)
+
+    /** Use [transform] from the next frame on. The capture plan must not change. */
+    fun setTransform(transform: Transform) {
+        xform = makeTransform(transform)
+    }
 
     override fun onImageAvailable(reader: ImageReader) {
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
@@ -413,27 +504,25 @@ private class FrameEncoder(
         }
         image.use { set.fill(it) }
 
+        val xf = xform!!
         try {
-            workers.execute { encode(set, seq, ptsUs) }
+            workers.execute { encode(set, xf, seq, ptsUs) }
         } catch (e: RejectedExecutionException) {
             // Closed meanwhile.
             synchronized(freeSets) { freeSets.addLast(set) }
         }
     }
 
-    private fun encode(set: PlaneSet, seq: Long, ptsUs: Long) {
+    private fun encode(set: PlaneSet, xf: YuvTransform, seq: Long, ptsUs: Long) {
         val start = System.nanoTime()
-        val y = set.y!!
-        val u = set.u!!
-        val v = set.v!!
         try {
             if (mode == EncodeMode.YUYV) {
                 val out = ByteArray(width * height * 2)
-                yuv420ToYuyv(width, height, y, u, v, out, rotate180)
+                xf.toYuyv(set.y!!, set.u!!, set.v!!, out)
                 deliver(seq, out, out.size, ptsUs, System.nanoTime() - start)
             } else {
                 val b = buffers.get()!!
-                yuv420ToNv21(width, height, y, u, v, b.nv21!!, rotate180)
+                xf.toNv21(set.y!!, set.u!!, set.v!!, b.nv21!!)
                 b.jpegOut.reset()
                 YuvImage(b.nv21, ImageFormat.NV21, width, height, null)
                     .compressToJpeg(rect, JPEG_QUALITY, b.jpegOut)
@@ -476,7 +565,7 @@ private class FrameEncoder(
         val now = System.nanoTime()
         if (now - statsSince >= STATS_PERIOD_NS) {
             val seconds = (now - statsSince) / 1e9
-            Log.i(TAG, "Encode $mode ${width}x$height: " +
+            Log.i(TAG, "Encode $mode ${plan.width}x${plan.height} -> ${width}x$height: " +
                 "%.1f fps, avg %.1f ms, max %.1f ms, busy drops %d, out of order %d".format(
                     statsFrames / seconds,
                     statsTotalNs / 1e6 / statsFrames,
@@ -498,7 +587,7 @@ private class FrameEncoder(
         private const val JPEG_QUALITY = 85
         private const val STATS_PERIOD_NS = 5_000_000_000L
 
-        /** Software JPEG at 1080p takes ~39 ms on the OnePlus 15; two fit 30 fps. */
+        /** Software JPEG at 1080p takes ~38 ms on the OnePlus 15; two fit 30 fps. */
         private const val WORKERS = 2
     }
 }

@@ -4,9 +4,12 @@
 package com.hifiphile.uvcamera.webcam
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.core.content.edit
 import com.hifiphile.uvcamera.camera.CameraInfo
 import com.hifiphile.uvcamera.camera.Facing
+import com.hifiphile.uvcamera.camera.Rotation
+import com.hifiphile.uvcamera.camera.Transform
 
 /** Largest frame height to advertise to the host. */
 enum class MaxResolution(val height: Int, val label: String) {
@@ -24,10 +27,44 @@ class WebcamSettings(context: Context) {
         get() = prefs.getString(KEY_CAMERA_ID, null)
         set(value) = prefs.edit { putString(KEY_CAMERA_ID, value) }
 
-    /** Rotate the image by 180° on top of the per-camera correction (upside-down mount). */
-    var rotate180: Boolean
-        get() = prefs.getBoolean(KEY_ROTATE_180, false)
-        set(value) = prefs.edit { putBoolean(KEY_ROTATE_180, value) }
+    /**
+     * User rotation, clockwise, on top of the per-camera landscape
+     * correction. Earlier versions only had a 180° toggle.
+     */
+    var rotation: Rotation
+        get() = when {
+            prefs.contains(KEY_ROTATION) ->
+                runCatching { Rotation.fromDegrees(prefs.getInt(KEY_ROTATION, 0)) }
+                    .getOrDefault(Rotation.R0)
+            prefs.getBoolean(KEY_ROTATE_180_LEGACY, false) -> Rotation.R180
+            else -> Rotation.R0
+        }
+        set(value) = prefs.edit {
+            putInt(KEY_ROTATION, value.degrees)
+            remove(KEY_ROTATE_180_LEGACY)
+        }
+
+    /** Flip the image left/right. */
+    var mirrorH: Boolean
+        get() = prefs.getBoolean(KEY_MIRROR_H, false)
+        set(value) = prefs.edit { putBoolean(KEY_MIRROR_H, value) }
+
+    /** Flip the image top/bottom. */
+    var mirrorV: Boolean
+        get() = prefs.getBoolean(KEY_MIRROR_V, false)
+        set(value) = prefs.edit { putBoolean(KEY_MIRROR_V, value) }
+
+    /** Listen for changes that can be applied while streaming. */
+    fun onTransformChanged(listener: () -> Unit): SharedPreferences.OnSharedPreferenceChangeListener {
+        val l = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key in TRANSFORM_KEYS) listener()
+        }
+        prefs.registerOnSharedPreferenceChangeListener(l)
+        return l
+    }
+
+    fun removeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) =
+        prefs.unregisterOnSharedPreferenceChangeListener(listener)
 
     var maxResolution: MaxResolution
         get() = prefs.getString(KEY_MAX_RESOLUTION, null)
@@ -38,7 +75,11 @@ class WebcamSettings(context: Context) {
     companion object {
         private const val KEY_CAMERA_ID = "camera_id"
         private const val KEY_MAX_RESOLUTION = "max_resolution"
-        private const val KEY_ROTATE_180 = "rotate_180"
+        private const val KEY_ROTATE_180_LEGACY = "rotate_180"
+        private const val KEY_ROTATION = "rotation"
+        private const val KEY_MIRROR_H = "mirror_h"
+        private const val KEY_MIRROR_V = "mirror_v"
+        private val TRANSFORM_KEYS = setOf(KEY_ROTATION, KEY_MIRROR_H, KEY_MIRROR_V)
 
         /**
          * Clockwise rotation that makes [camera]'s frames upright with the
@@ -55,13 +96,11 @@ class WebcamSettings(context: Context) {
         }
 
         /**
-         * Whether frames from [camera] need a 180° turn: its landscape
-         * correction, flipped again for [userRotate180]. Only 0° and 180°
-         * are supported (a 90° turn wouldn't fit a landscape frame), which
-         * covers sensors mounted at 90° or 270°.
+         * The full transform for [camera]: its landscape correction plus the
+         * user's rotation, then the user's mirroring of the final image.
          */
-        fun needsRotate180(camera: CameraInfo, userRotate180: Boolean): Boolean =
-            (landscapeRotation(camera) == 180) != userRotate180
+        fun transformFor(camera: CameraInfo, rotation: Rotation, mirrorH: Boolean, mirrorV: Boolean) =
+            Transform(Rotation.fromDegrees(landscapeRotation(camera)) + rotation, mirrorH, mirrorV)
 
         /** The chosen camera, or the first back camera, or any camera. */
         fun pickCamera(cameras: List<CameraInfo>, cameraId: String?): CameraInfo? =

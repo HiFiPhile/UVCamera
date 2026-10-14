@@ -38,6 +38,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hifiphile.uvcamera.R
 import com.hifiphile.uvcamera.camera.CameraInfo
 import com.hifiphile.uvcamera.camera.Facing
+import com.hifiphile.uvcamera.camera.Rotation
 import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.Status
@@ -165,7 +166,9 @@ private fun WebcamSettingsRows(locked: Boolean) {
         mutableStateOf(WebcamSettings.pickCamera(cameras, settings.cameraId)?.id)
     }
     var maxResolution by remember { mutableStateOf(settings.maxResolution) }
-    var rotate180 by remember { mutableStateOf(settings.rotate180) }
+    var rotation by remember { mutableStateOf(settings.rotation) }
+    var mirrorH by remember { mutableStateOf(settings.mirrorH) }
+    var mirrorV by remember { mutableStateOf(settings.mirrorV) }
 
     Text(
         stringResource(R.string.webcam_settings_camera),
@@ -204,26 +207,53 @@ private fun WebcamSettingsRows(locked: Boolean) {
         }
     }
 
-    FilterChip(
-        selected = rotate180,
-        onClick = {
-            rotate180 = !rotate180
-            settings.rotate180 = rotate180
-        },
-        enabled = !locked,
-        label = { Text(stringResource(R.string.webcam_settings_rotate_180)) },
-    )
-    Text(
-        stringResource(R.string.webcam_settings_orientation_hint),
-        style = MaterialTheme.typography.bodySmall,
-    )
-
     if (locked) {
         Text(
             stringResource(R.string.webcam_settings_locked),
             style = MaterialTheme.typography.bodySmall,
         )
     }
+
+    // Applied live, so never locked.
+    Text(
+        stringResource(R.string.webcam_settings_orientation),
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (r in Rotation.entries) {
+            FilterChip(
+                selected = r == rotation,
+                onClick = {
+                    rotation = r
+                    settings.rotation = r
+                },
+                label = { Text(stringResource(R.string.webcam_rotation_chip, r.degrees)) },
+            )
+        }
+    }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = mirrorH,
+            onClick = {
+                mirrorH = !mirrorH
+                settings.mirrorH = mirrorH
+            },
+            label = { Text(stringResource(R.string.webcam_mirror_h)) },
+        )
+        FilterChip(
+            selected = mirrorV,
+            onClick = {
+                mirrorV = !mirrorV
+                settings.mirrorV = mirrorV
+            },
+            label = { Text(stringResource(R.string.webcam_mirror_v)) },
+        )
+    }
+    Text(
+        stringResource(R.string.webcam_settings_orientation_hint),
+        style = MaterialTheme.typography.bodySmall,
+    )
 }
 
 @Composable

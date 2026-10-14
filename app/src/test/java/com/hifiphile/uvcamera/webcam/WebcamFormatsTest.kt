@@ -4,6 +4,8 @@
 package com.hifiphile.uvcamera.webcam
 
 import com.hifiphile.uvcamera.camera.CameraInfo
+import com.hifiphile.uvcamera.camera.Rotation
+import com.hifiphile.uvcamera.camera.Transform
 import com.hifiphile.uvcamera.camera.Facing
 import com.hifiphile.uvcamera.camera.Resolution
 import com.hifiphile.uvcamera.camera.StreamFormat
@@ -73,16 +75,19 @@ class WebcamFormatsTest {
         // turn came out upside down).
         assertEquals(0, WebcamSettings.landscapeRotation(back))
         assertEquals(0, WebcamSettings.landscapeRotation(front))
-        assertEquals(false, WebcamSettings.needsRotate180(back, userRotate180 = false))
-        assertEquals(false, WebcamSettings.needsRotate180(front, userRotate180 = false))
-        assertEquals(true, WebcamSettings.needsRotate180(front, userRotate180 = true))
+        fun t(c: CameraInfo, r: Rotation, h: Boolean = false) = WebcamSettings.transformFor(c, r, h, false)
+        assertEquals(Transform(), t(back, Rotation.R0))
+        assertEquals(Transform(), t(front, Rotation.R0))
+        assertEquals(Transform(Rotation.R90, mirrorH = true), t(front, Rotation.R90, h = true))
 
-        // Sensors mounted the other way (e.g. the Nexus 5X back camera at 270°).
+        // Sensors mounted the other way (e.g. the Nexus 5X back camera at 270°):
+        // the correction adds to the user's rotation.
         val flippedBack = back.copy(sensorOrientation = 270)
         val flippedFront = front.copy(sensorOrientation = 90)
-        assertEquals(true, WebcamSettings.needsRotate180(flippedBack, userRotate180 = false))
-        assertEquals(true, WebcamSettings.needsRotate180(flippedFront, userRotate180 = false))
-        assertEquals(false, WebcamSettings.needsRotate180(flippedBack, userRotate180 = true))
+        assertEquals(Transform(Rotation.R180), t(flippedBack, Rotation.R0))
+        assertEquals(Transform(Rotation.R180), t(flippedFront, Rotation.R0))
+        assertEquals(Transform(Rotation.R0), t(flippedBack, Rotation.R180))
+        assertEquals(Transform(Rotation.R270), t(flippedBack, Rotation.R90))
     }
 
     @Test

@@ -17,6 +17,7 @@ import android.util.Log
 import com.hifiphile.uvcamera.MainActivity
 import com.hifiphile.uvcamera.R
 import com.hifiphile.uvcamera.camera.CameraStreamer
+import com.hifiphile.uvcamera.camera.Transform
 import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.CONTROL_BRIGHTNESS
 import com.hifiphile.uvcamera.daemon.Client
@@ -81,6 +82,10 @@ class WebcamService : Service() {
     @Volatile
     private var streamId = 0
 
+    /** Current rotation/mirroring, kept up to date from the settings. */
+    @Volatile
+    private var transform = Transform()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -140,11 +145,21 @@ class WebcamService : Service() {
             return
         }
         val formats = webcamFormats(camera, settings.maxResolution.height)
-        val rotate180 = WebcamSettings.needsRotate180(camera, settings.rotate180)
+        fun currentTransform() = WebcamSettings.transformFor(
+            camera, settings.rotation, settings.mirrorH, settings.mirrorV)
+        transform = currentTransform()
         val streamer = CameraStreamer(manager, camera.id)
         _state.update { it.copy(camera = "${camera.id} (${camera.facing.name.lowercase()})") }
         Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
-            "rotate180=$rotate180), advertising $formats")
+            "$transform), advertising $formats")
+
+        // Rotation and mirroring apply live; the camera and formats don't.
+        val listener = settings.onTransformChanged {
+            transform = currentTransform()
+            Log.i(TAG, "Transform changed: $transform")
+            _state.update { it.copy(error = null) }
+            streamer.setTransform(transform)
+        }
 
         while (!stopping) {
             try {
@@ -161,7 +176,7 @@ class WebcamService : Service() {
                     client.close()
                     throw e
                 }
-                serve(channel, streamer, rotate180)
+                serve(channel, streamer)
             } catch (e: Exception) {
                 if (stopping) {
                     break
@@ -172,11 +187,12 @@ class WebcamService : Service() {
             }
         }
 
+        settings.removeListener(listener)
         streamer.release()
     }
 
     /** Follow the host's streams until the channel closes. */
-    private fun serve(channel: SourceChannel, streamer: CameraStreamer, rotate180: Boolean) {
+    private fun serve(channel: SourceChannel, streamer: CameraStreamer) {
         this.channel = channel
         if (stopping) {
             channel.close()
@@ -194,7 +210,7 @@ class WebcamService : Service() {
                         _state.update { it.copy(streaming = event.params, error = null) }
                         streamer.start(
                             event.params,
-                            rotate180,
+                            transform,
                             { data, length, ptsUs -> sender.offer(streamId, data, length, ptsUs) },
                             { error -> _state.update { it.copy(error = error) } },
                         )
