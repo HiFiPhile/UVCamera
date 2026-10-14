@@ -36,8 +36,15 @@ const STATS_PERIOD: Duration = Duration::from_secs(5);
 const REPEAT_LIMIT: Duration = Duration::from_secs(1);
 /// How long after a fresh app frame to wait for the next one, in frame
 /// intervals, before repeating it. Fresh frames are sent as they arrive, so
-/// this only matters when the camera runs slower than the stream.
-const REPEAT_AFTER_INTERVALS: f64 = 1.5;
+/// this only matters when the camera stalls or runs slower than the stream.
+/// Two intervals tolerates software-encoder jitter (frames up to ~60 ms
+/// apart at 30 fps); at 1.5 every late frame caused a repeat followed by
+/// the fresh frame, i.e. more frames per second than negotiated.
+const REPEAT_AFTER_INTERVALS: f64 = 2.0;
+/// Minimum spacing between queued frames, in frame intervals. Without it, a
+/// repeat followed by a late fresh frame sends two frames back to back and
+/// the host sees more frames per second than negotiated.
+const MIN_GAP_INTERVALS: f64 = 0.5;
 
 /// Why [`Streamer::run`] returned.
 #[derive(Debug, PartialEq, Eq)]
@@ -116,6 +123,8 @@ struct ActiveStream {
     /// Buffers owned by us (not queued to the driver).
     free: Vec<usize>,
     next_due: Instant,
+    /// When the last frame was queued.
+    last_sent: Option<Instant>,
     sequence: u64,
     dropped: u64,
     started: Instant,
@@ -303,6 +312,7 @@ impl Streamer {
             pattern: TestPattern::new(params.kind, params.width, params.height),
             free: (0..count).collect(),
             next_due: now,
+            last_sent: None,
             sequence: 0,
             dropped: 0,
             started: now,
@@ -434,6 +444,15 @@ impl Streamer {
         if !fresh && now < stream.next_due {
             return Ok(());
         }
+        let interval = Duration::from_nanos(u64::from(stream.params.interval) * 100);
+        if let Some(last) = stream.last_sent {
+            let earliest = last + interval.mul_f64(MIN_GAP_INTERVALS);
+            if now < earliest {
+                // Try again then; the event loop's timeout covers it.
+                stream.next_due = stream.next_due.min(earliest);
+                return Ok(());
+            }
+        }
         let Some(index) = stream.free.pop() else {
             stream.stats.starved += 1;
             return Ok(());
@@ -478,7 +497,7 @@ impl Streamer {
         stream.stats.produce_total += produce;
         stream.stats.produce_max = stream.stats.produce_max.max(produce);
 
-        let interval = Duration::from_nanos(u64::from(stream.params.interval) * 100);
+        stream.last_sent = Some(now);
         stream.sequence += 1;
         if fresh {
             // The camera sets the pace; only fill in if it falls behind.
