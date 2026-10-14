@@ -82,7 +82,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         fun plan(chars: CameraCharacteristics, params: StreamParams, transform: Transform): CapturePlan {
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalArgumentException("Camera has no stream configurations")
-            val maxDuration = params.interval * 100L
+            val maxDuration = maxFrameDurationNs(params.interval)
             fun fastEnough(format: Int, size: Size) =
                 map.getOutputMinFrameDuration(format, size) in 1..maxDuration
 
@@ -104,6 +104,13 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                         "with this camera")
             return CapturePlan(mode, w, h)
         }
+
+        /**
+         * Longest camera frame duration that keeps up with a UVC frame
+         * [interval] (100 ns units). Intervals are truncated, 333333 for
+         * 30 fps, while cameras report 33333333 ns: allow the lost fraction.
+         */
+        fun maxFrameDurationNs(interval: Int): Long = interval * 100L + 99
 
         /**
          * The smallest capture size whose transformed image covers the output:
@@ -193,6 +200,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
     private var reader: ImageReader? = null
     private var encoder: FrameEncoder? = null
     private var active: Active? = null
+
+    /** A stream the camera couldn't start; retried when the transform changes. */
+    private class Failed(val params: StreamParams, val sink: FrameSink, val onError: (String) -> Unit)
+
+    private var failed: Failed? = null
     private var requestBuilder: CaptureRequest.Builder? = null
     private val chars by lazy { manager.getCameraCharacteristics(cameraId) }
     private val colorTemperatureRange by lazy { colorTemperatureRange(chars) }
@@ -350,7 +362,14 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
      */
     fun setTransform(transform: Transform) {
         handler.post {
-            val current = active ?: return@post
+            val current = active
+            if (current == null) {
+                failed?.let {
+                    Log.i(TAG, "Retrying the stream with $transform")
+                    open(it.params, transform, it.sink, it.onError)
+                }
+                return@post
+            }
             if (current.transform == transform) {
                 return@post
             }
@@ -375,7 +394,10 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
     }
 
     fun stop() {
-        handler.post { closeCamera() }
+        handler.post {
+            closeCamera()
+            failed = null
+        }
     }
 
     /** Stop and release the handler thread. */
@@ -396,11 +418,13 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
     }
 
     private fun open(params: StreamParams, transform: Transform, sink: FrameSink, onError: (String) -> Unit) {
+        failed = null
         try {
             openCamera(params, transform, sink, onError)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start camera", e)
             closeCamera()
+            failed = Failed(params, sink, onError)
             onError(e.message ?: e.toString())
         }
     }

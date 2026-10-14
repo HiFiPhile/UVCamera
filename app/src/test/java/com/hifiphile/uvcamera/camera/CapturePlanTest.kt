@@ -39,4 +39,12 @@ class CapturePlanTest {
     fun noCoveringSize() {
         assertNull(CameraStreamer.chooseCaptureSize(listOf(1920 to 1080), 1920, 1080, Transform(Rotation.R90)))
     }
+
+    @Test
+    fun frameDurationAllowsTruncatedIntervals() {
+        // 30 fps: UVC says 333333 x 100 ns, cameras say 33333333 ns.
+        assertEquals(true, 33_333_333L <= CameraStreamer.maxFrameDurationNs(333_333))
+        assertEquals(false, 33_333_334L + 100 <= CameraStreamer.maxFrameDurationNs(333_333))
+        assertEquals(true, 66_666_666L <= CameraStreamer.maxFrameDurationNs(666_666))
+    }
 }
