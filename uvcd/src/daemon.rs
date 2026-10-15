@@ -43,7 +43,7 @@ use tracing::{debug, error, info, info_span, trace, warn};
 
 use crate::{
     auth::Authenticator,
-    gadget::{EndpointConfig, Gadget},
+    gadget::{EndpointConfig, Gadget, Transfer},
     message::{self, EnableRequest, Frame, Request, Response, Status},
     session::{Session, SessionConfig, teardown},
     source::SourceHub,
@@ -181,6 +181,7 @@ impl Daemon {
                 specs: request.formats.clone(),
                 controls: request.controls,
                 endpoint: EndpointConfig {
+                    transfer: Transfer::Isoc,
                     maxpacket: MAXPACKET,
                     maxburst: request.maxburst.into(),
                 },

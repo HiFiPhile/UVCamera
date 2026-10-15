@@ -20,7 +20,7 @@ use clap::{Args, Parser, Subcommand};
 use tracing::{info, warn};
 
 use crate::{
-    gadget::{EndpointConfig, Gadget},
+    gadget::{BULK_MAX_PAYLOAD, EndpointConfig, FUNCTION_UVC, FUNCTION_UVCX, Gadget, Transfer},
     session::{Original, Session, SessionConfig, teardown},
     source::SourceHub,
     uvc::{
@@ -28,6 +28,9 @@ use crate::{
         format::{FormatKind, FormatSpec},
     },
 };
+
+/// Default bulk payload: whole frames for most MJPEG sizes.
+const DEFAULT_BULK_PAYLOAD: u32 = 512 * 1024;
 
 /// What `up` changed, so `down` can undo it after a crash.
 #[derive(Debug, PartialEq, Eq)]
@@ -141,6 +144,13 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
     if !rustix::process::getuid().is_root() {
         warn!("Not running as root; configfs changes will likely fail");
     }
+    let maxpacket = cli.maxpacket.unwrap_or(match cli.transfer {
+        Transfer::Isoc => 3072,
+        Transfer::Bulk => DEFAULT_BULK_PAYLOAD,
+    });
+    if cli.transfer == Transfer::Isoc && maxpacket > 3072 {
+        bail!("Isochronous max packet size is at most 3072");
+    }
 
     if gadget.function_exists() || gadget.is_linked() || state_file.exists() {
         warn!("Cleaning up state from a previous run");
@@ -160,7 +170,8 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
             // The test pattern has nothing to control beyond brightness.
             controls: ControlCaps::default(),
             endpoint: EndpointConfig {
-                maxpacket: cli.maxpacket,
+                transfer: cli.transfer,
+                maxpacket,
                 maxburst: cli.stream.maxburst,
             },
             udc: cli.udc.clone(),
@@ -188,7 +199,8 @@ fn up(gadget: &Gadget, cli: &UpCli, state_file: &Path) -> Result<()> {
 }
 
 pub fn subcommand_gadget(cli: &GadgetCli) -> Result<()> {
-    let gadget = Gadget::new(&cli.common.gadget, &cli.common.config)?;
+    let gadget =
+        Gadget::new(&cli.common.gadget, &cli.common.config)?.with_function(&cli.common.function);
 
     match &cli.command {
         GadgetCommand::Up(c) => up(&gadget, c, &cli.common.state_file),
@@ -210,6 +222,17 @@ struct CommonOpts {
     /// Gadget configuration to add the UVC function to.
     #[arg(long, value_name = "NAME", default_value = "b.1", global = true)]
     config: String,
+
+    /// UVC function driver: the kernel's built-in one, or the usb_f_uvcx
+    /// module (frame-based formats, bulk streaming), which must be loaded.
+    #[arg(
+        long,
+        value_name = "NAME",
+        default_value = FUNCTION_UVC,
+        value_parser = [FUNCTION_UVC, FUNCTION_UVCX],
+        global = true
+    )]
+    function: String,
 
     /// Records what `up` changed so `down` can restore it.
     #[arg(
@@ -252,9 +275,14 @@ struct UpCli {
     #[arg(long, value_name = "NAME")]
     udc: Option<String>,
 
-    /// Isochronous max packet size (1-3072).
-    #[arg(long, default_value_t = 3072, value_parser = clap::value_parser!(u32).range(1..=3072))]
-    maxpacket: u32,
+    /// Streaming endpoint type. Bulk needs `--function uvcx`.
+    #[arg(long, value_enum, default_value_t = Transfer::Isoc)]
+    transfer: Transfer,
+
+    /// Isochronous: max packet size (1-3072, default 3072). Bulk: payload
+    /// size (default 512 KiB).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i64::from(BULK_MAX_PAYLOAD)))]
+    maxpacket: Option<u32>,
 
     /// Don't raise the USB controller's IRQ thread to real-time priority
     /// while streaming.

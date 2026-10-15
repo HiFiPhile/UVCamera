@@ -21,8 +21,13 @@ use crate::uvc::{
     format::{Format, FormatSpec, FormatTable, Frame},
 };
 
-/// Our function instance: `functions/uvc.<INSTANCE>`.
+/// Our function instance: `functions/<function>.<INSTANCE>`.
 pub const INSTANCE: &str = "uvcamera";
+/// The kernel's built-in UVC function.
+pub const FUNCTION_UVC: &str = "uvc";
+/// Our `usb_f_uvcx` module: upstream f_uvc with frame-based formats and bulk
+/// streaming.
+pub const FUNCTION_UVCX: &str = "uvcx";
 /// Name of our link in the config. Vendor init scripts only remove `f1`..`f9`.
 pub const CONFIG_LINK: &str = "uvcamera";
 /// Interface string shown by hosts.
@@ -116,6 +121,8 @@ fn link(target: &Path, link: &Path) -> Result<()> {
 pub struct Gadget {
     root: PathBuf,
     config: String,
+    /// USB function driver: [`FUNCTION_UVC`] or [`FUNCTION_UVCX`].
+    function: String,
 }
 
 impl Gadget {
@@ -127,11 +134,20 @@ impl Gadget {
         Ok(Self {
             root,
             config: config.into(),
+            function: FUNCTION_UVC.into(),
         })
     }
 
+    /// Use another UVC function driver than the built-in one.
+    pub fn with_function(mut self, function: impl Into<String>) -> Self {
+        self.function = function.into();
+        self
+    }
+
     pub fn function_dir(&self) -> PathBuf {
-        self.root.join("functions").join(format!("uvc.{INSTANCE}"))
+        self.root
+            .join("functions")
+            .join(format!("{}.{INSTANCE}", self.function))
     }
 
     fn config_link(&self) -> PathBuf {
@@ -232,6 +248,20 @@ impl Gadget {
             &bitmap(controls.processing_unit_bm_controls()),
         )?;
 
+        let transfer = f.join("streaming_transfer");
+        match endpoint.transfer {
+            Transfer::Isoc => {
+                if transfer.exists() {
+                    write_attr(&transfer, "isoc")?;
+                }
+            }
+            Transfer::Bulk => {
+                if !transfer.exists() {
+                    bail!("The {} function has no bulk streaming", self.function);
+                }
+                write_attr(&transfer, "bulk")?;
+            }
+        }
         write_attr(
             &f.join("streaming_maxpacket"),
             &endpoint.maxpacket.to_string(),
@@ -397,11 +427,14 @@ impl Gadget {
         let deadline = Instant::now() + timeout;
 
         loop {
-            if let Some(path) = find_video_node()? {
+            if let Some(path) = find_video_node(&self.function)? {
                 return Ok(path);
             }
             if Instant::now() >= deadline {
-                bail!("Video node for uvc.{INSTANCE} did not appear within {timeout:?}");
+                bail!(
+                    "Video node for {}.{INSTANCE} did not appear within {timeout:?}",
+                    self.function
+                );
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -410,7 +443,7 @@ impl Gadget {
 
 /// Look for `/sys/class/video4linux/video*` whose `function_name` is our
 /// function instance, and return its `/dev` node once ueventd created it.
-fn find_video_node() -> Result<Option<PathBuf>> {
+fn find_video_node(function: &str) -> Result<Option<PathBuf>> {
     const CLASS: &str = "/sys/class/video4linux";
 
     let entries = match fs::read_dir(CLASS) {
@@ -425,7 +458,7 @@ fn find_video_node() -> Result<Option<PathBuf>> {
         };
         // The attribute is the configfs item name, i.e. "uvc.<instance>".
         let name = name.trim_end();
-        if name == format!("uvc.{INSTANCE}") || name == INSTANCE {
+        if name == format!("{function}.{INSTANCE}") || name == INSTANCE {
             let dev = Path::new("/dev").join(entry.file_name());
             return Ok(dev.exists().then_some(dev));
         }
@@ -434,21 +467,45 @@ fn find_video_node() -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// Isochronous streaming endpoint configuration.
+/// How the streaming endpoint moves video data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Transfer {
+    /// Isochronous: reserved bandwidth, lost packets are not retried.
+    #[default]
+    Isoc,
+    /// Bulk: whatever bandwidth is free, with retries. Needs `uvcx`.
+    Bulk,
+}
+
+/// Largest bulk payload `uvcx` accepts.
+pub const BULK_MAX_PAYLOAD: u32 = 16 * 1024 * 1024;
+
+/// Streaming endpoint configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct EndpointConfig {
-    /// `streaming_maxpacket`: 1..=3072. Above 1024, high-speed uses
-    /// high-bandwidth (multiple transactions per microframe).
+    pub transfer: Transfer,
+    /// `streaming_maxpacket`. Isochronous: 1..=3072; above 1024,
+    /// high-speed uses high-bandwidth (multiple transactions per
+    /// microframe). Bulk: the payload size, rounded up to 1024.
     pub maxpacket: u32,
     /// `streaming_maxburst`: 0..=15, SuperSpeed only.
     pub maxburst: u32,
 }
 
 impl EndpointConfig {
-    /// Bytes per service interval at `speed`, mirroring f_uvc's descriptor
-    /// setup. This is what dwMaxPayloadTransferSize must not exceed.
+    /// Isochronous: bytes per service interval at `speed`, mirroring f_uvc's
+    /// descriptor setup. Bulk: the payload size. This is what
+    /// dwMaxPayloadTransferSize must not exceed.
     pub fn max_payload(&self, speed: crate::v4l2::Speed) -> u32 {
         use crate::v4l2::Speed;
+
+        if self.transfer == Transfer::Bulk {
+            return self
+                .maxpacket
+                .div_ceil(1024)
+                .clamp(1, BULK_MAX_PAYLOAD / 1024)
+                * 1024;
+        }
 
         let maxburst = self.maxburst.min(15);
         let mut maxpacket = self.maxpacket.clamp(1, 3072);
@@ -497,6 +554,7 @@ mod tests {
     #[test]
     fn max_payload_matches_f_uvc() {
         let hs = EndpointConfig {
+            transfer: Transfer::Isoc,
             maxpacket: 3072,
             maxburst: 0,
         };
@@ -505,11 +563,20 @@ mod tests {
         assert_eq!(hs.max_payload(Speed::Full), 1023);
 
         let ss = EndpointConfig {
+            transfer: Transfer::Isoc,
             maxpacket: 3000,
             maxburst: 6,
         };
         assert_eq!(ss.max_payload(Speed::Super), 3072 * 7);
         assert_eq!(ss.max_payload(Speed::High), 3072);
+
+        let bulk = EndpointConfig {
+            transfer: Transfer::Bulk,
+            maxpacket: 100_000,
+            maxburst: 15,
+        };
+        assert_eq!(bulk.max_payload(Speed::Super), 100_352);
+        assert_eq!(bulk.max_payload(Speed::High), 100_352);
     }
 
     #[test]
