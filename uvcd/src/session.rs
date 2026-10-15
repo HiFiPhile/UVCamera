@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     gadget::{DEVICE_CLASS_IAD, EndpointConfig, Gadget, resolve_udc},
@@ -204,6 +204,21 @@ impl Drop for Session {
     }
 }
 
+/// Whether f_uvc rewrites the interface number in requests (mainline 6.2;
+/// Android backported it to 5.15 and 6.1). Only a first guess for
+/// [`Protocol`], which learns the real behavior from requests.
+fn kernel_rewrites_index() -> bool {
+    let release = rustix::system::uname()
+        .release()
+        .to_string_lossy()
+        .into_owned();
+    let mut numbers = release
+        .split(['.', '-'])
+        .map(|n| n.parse::<u32>().unwrap_or(0));
+    let version = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+    version >= (5, 15)
+}
+
 /// What the stream thread needs.
 struct Server {
     gadget: Gadget,
@@ -253,6 +268,13 @@ impl Server {
             // Keep host-set controls across rebinds.
             for control in self.source.controls() {
                 protocol.set_control(control);
+            }
+            match self.gadget.interface_numbers() {
+                Ok(interfaces) => {
+                    debug!("Interfaces {interfaces:?}");
+                    protocol.set_interfaces(interfaces, kernel_rewrites_index());
+                }
+                Err(e) => warn!("{e:?}"),
             }
             let irq_boost = self.irq_udc.as_deref().map(IrqBoost::new);
             let exit = Streamer::new(

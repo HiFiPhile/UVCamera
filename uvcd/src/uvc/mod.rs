@@ -22,9 +22,34 @@ use self::{
     format::{Format, FormatKind, FormatTable, Frame, Interval},
 };
 
-// wIndex low byte after the kernel's fixup.
+// wIndex low byte for our interfaces in kernels that rewrite it (mainline
+// 6.2+, Android 5.15 and 6.1); older ones pass the interface number.
 const INTERFACE_CONTROL: u8 = 0;
 const INTERFACE_STREAMING: u8 = 1;
+
+/// The function's VideoControl and VideoStreaming interface numbers, from
+/// configfs (`bInterfaceNumber`), as hosts address them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterfaceNumbers {
+    pub control: u8,
+    pub streaming: u8,
+}
+
+impl Default for InterfaceNumbers {
+    fn default() -> Self {
+        Self {
+            control: INTERFACE_CONTROL,
+            streaming: INTERFACE_STREAMING,
+        }
+    }
+}
+
+/// Which interface a request is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Control,
+    Streaming,
+}
 
 // Request codes (UVC 1.5 table A-8).
 pub const SET_CUR: u8 = 0x01;
@@ -254,6 +279,10 @@ pub struct Protocol {
     /// Exposed controls and their current values.
     ranges: BTreeMap<ControlId, ControlRange>,
     values: BTreeMap<ControlId, i32>,
+    interfaces: InterfaceNumbers,
+    /// Whether the kernel rewrites wIndex (see [`INTERFACE_CONTROL`]):
+    /// learned from requests, guessed until then.
+    rewrites_index: bool,
 }
 
 impl Protocol {
@@ -280,6 +309,47 @@ impl Protocol {
             error_code: ErrorCode::None,
             ranges,
             values,
+            interfaces: InterfaceNumbers::default(),
+            rewrites_index: true,
+        }
+    }
+
+    /// The function's interface numbers, and whether the kernel is expected
+    /// to rewrite wIndex to [`INTERFACE_CONTROL`]/[`INTERFACE_STREAMING`].
+    pub fn set_interfaces(&mut self, interfaces: InterfaceNumbers, rewrites_index: bool) {
+        self.interfaces = interfaces;
+        self.rewrites_index = rewrites_index;
+    }
+
+    /// The interface a request is for, under either wIndex convention.
+    fn target(&mut self, req: &CtrlRequest) -> Option<Target> {
+        let i = req.interface();
+        let InterfaceNumbers { control, streaming } = self.interfaces;
+
+        // Only VideoControl has entities; both conventions keep them.
+        if req.entity() != 0 {
+            return (i == control || i == INTERFACE_CONTROL).then_some(Target::Control);
+        }
+        // Numbers only one convention uses tell which one the kernel has.
+        if i == streaming && streaming != INTERFACE_STREAMING {
+            self.rewrites_index = false;
+            return Some(Target::Streaming);
+        }
+        if i == INTERFACE_CONTROL && control != INTERFACE_CONTROL {
+            self.rewrites_index = true;
+            return Some(Target::Control);
+        }
+        match i {
+            INTERFACE_CONTROL => Some(Target::Control),
+            // The control interface's own number under the old convention.
+            INTERFACE_STREAMING if control == INTERFACE_STREAMING => Some(if self.rewrites_index {
+                Target::Streaming
+            } else {
+                Target::Control
+            }),
+            INTERFACE_STREAMING => Some(Target::Streaming),
+            _ if i == control => Some(Target::Control),
+            _ => None,
         }
     }
 
@@ -370,15 +440,15 @@ impl Protocol {
             return self.fail(ErrorCode::InvalidRequest);
         }
 
-        match req.interface() {
-            INTERFACE_STREAMING => self.handle_streaming(req),
-            INTERFACE_CONTROL => match req.entity() {
+        match self.target(req) {
+            Some(Target::Streaming) => self.handle_streaming(req),
+            Some(Target::Control) => match req.entity() {
                 0 => self.handle_interface_control(req),
                 id if id == self.entities.camera_terminal => self.handle_camera_terminal(req),
                 id if id == self.entities.processing_unit => self.handle_processing_unit(req),
                 _ => self.fail(ErrorCode::InvalidUnit),
             },
-            _ => self.fail(ErrorCode::InvalidUnit),
+            None => self.fail(ErrorCode::InvalidUnit),
         }
     }
 
@@ -582,6 +652,62 @@ mod tests {
             Reply::Data(d) => d,
             r => panic!("Expected data, got {r:?}"),
         }
+    }
+
+    /// GKI 5.10 passes interface numbers through: with MTP as interface 0,
+    /// control is 1 and streaming 2.
+    #[test]
+    fn raw_interface_numbers() {
+        let mut p = protocol();
+        p.set_interfaces(
+            InterfaceNumbers {
+                control: 1,
+                streaming: 2,
+            },
+            false,
+        );
+        let probe =
+            StreamingControl::parse(&data(p.handle_setup(&get(GET_CUR, VS_PROBE_CONTROL, 2))));
+        assert_eq!(probe.format_index, 1);
+        // Processing unit 2 on interface 1.
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_CUR, PU_BRIGHTNESS_CONTROL, 0x0201, 2))),
+            vec![128, 0]
+        );
+        // The control interface's error code, at interface 1.
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_CUR, VC_REQUEST_ERROR_CODE_CONTROL, 1, 1))),
+            vec![0]
+        );
+        assert_eq!(
+            p.handle_setup(&get(GET_CUR, VS_PROBE_CONTROL, 3)),
+            Reply::Stall
+        );
+    }
+
+    /// Kernels that rewrite wIndex send 0 and 1 whatever the numbers are.
+    #[test]
+    fn rewritten_interface_numbers() {
+        let mut p = protocol();
+        // Guessed wrong at first; the first request at 0 corrects it.
+        p.set_interfaces(
+            InterfaceNumbers {
+                control: 1,
+                streaming: 2,
+            },
+            false,
+        );
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_CUR, VC_REQUEST_ERROR_CODE_CONTROL, 0, 1))),
+            vec![0]
+        );
+        let probe =
+            StreamingControl::parse(&data(p.handle_setup(&get(GET_CUR, VS_PROBE_CONTROL, 1))));
+        assert_eq!(probe.format_index, 1);
+        assert_eq!(
+            data(p.handle_setup(&req(0xa1, GET_CUR, PU_BRIGHTNESS_CONTROL, 0x0200, 2))),
+            vec![128, 0]
+        );
     }
 
     #[test]

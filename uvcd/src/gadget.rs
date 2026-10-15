@@ -443,6 +443,15 @@ impl Gadget {
         remove(&f, true)
     }
 
+    /// The function's interface numbers, assigned when the gadget binds.
+    pub fn interface_numbers(&self) -> Result<crate::uvc::InterfaceNumbers> {
+        let f = self.function_dir();
+        Ok(crate::uvc::InterfaceNumbers {
+            control: parse_u8(&read_attr(&f.join("control/bInterfaceNumber"))?)?,
+            streaming: parse_u8(&read_attr(&f.join("streaming/bInterfaceNumber"))?)?,
+        })
+    }
+
     /// Find the video node created for our function after binding.
     pub fn wait_for_video_node(&self, timeout: Duration) -> Result<PathBuf> {
         let deadline = Instant::now() + timeout;
