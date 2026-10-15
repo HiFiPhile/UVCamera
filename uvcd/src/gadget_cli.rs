@@ -134,7 +134,9 @@ pub fn build_specs(formats: &[FormatKind], mjpeg_fps: &[u32]) -> Vec<FormatSpec>
     formats
         .iter()
         .map(|&kind| match kind {
-            FormatKind::Mjpeg => FormatSpec::default_for(kind).with_fps(mjpeg_fps),
+            FormatKind::Mjpeg | FormatKind::H264 => {
+                FormatSpec::default_for(kind).with_fps(mjpeg_fps)
+            }
             FormatKind::Yuyv => FormatSpec::default_for(kind),
         })
         .collect()

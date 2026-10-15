@@ -50,14 +50,21 @@ enum class EncodeMode {
 
     /** YUV from the camera, transformed and repacked to YUYV. */
     YUYV,
+
+    /** YUV from the camera, transformed, compressed by the hardware H.264 encoder. */
+    H264,
 }
 
 /** Encoder and camera capture size for a stream. */
 data class CapturePlan(val mode: EncodeMode, val width: Int, val height: Int)
 
-/** Receives encoded frames: [length] bytes of [data], captured at [ptsUs]. */
+/**
+ * Receives encoded frames: [length] bytes of [data], captured at [ptsUs].
+ * Frames of formats that aren't intra-only come in decoding order, and
+ * [keyFrame] tells which ones start over (always true for the others).
+ */
 fun interface FrameSink {
-    fun onFrame(data: ByteArray, length: Int, ptsUs: Long)
+    fun onFrame(data: ByteArray, length: Int, ptsUs: Long, keyFrame: Boolean)
 }
 
 /**
@@ -94,7 +101,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height)
             }
 
-            val mode = if (params.kind == FormatKind.YUYV) EncodeMode.YUYV else EncodeMode.YUV_JPEG
+            val mode = when (params.kind) {
+                FormatKind.YUYV -> EncodeMode.YUYV
+                FormatKind.H264 -> EncodeMode.H264
+                FormatKind.MJPEG -> EncodeMode.YUV_JPEG
+            }
             val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
                 .filter { fastEnough(ImageFormat.YUV_420_888, it) }
                 .map { it.width to it.height }
@@ -400,6 +411,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         }
     }
 
+    /** H.264: make the next frame an IDR frame. */
+    fun requestKeyFrame() {
+        handler.post { encoder?.requestKeyFrame() }
+    }
+
     /** Stop and release the handler thread. */
     fun release() {
         handler.post {
@@ -592,7 +608,8 @@ private class WorkerBuffers(width: Int, height: Int, mode: EncodeMode) {
  * copied out of the image on the camera thread (so the camera can reuse it)
  * and transformed/compressed on [WORKERS] threads: software JPEG at 1080p
  * takes longer than a frame interval on one core. Frames that finish out of
- * order are dropped so the host never goes backwards.
+ * order are dropped so the host never goes backwards. For H.264, one worker
+ * transforms frames into the hardware encoder's input, in order.
  */
 private class FrameEncoder(
     private val plan: CapturePlan,
@@ -611,16 +628,27 @@ private class FrameEncoder(
     @Volatile
     private var xform = makeTransform(transform)
 
+    private val workerCount = if (mode == EncodeMode.H264) 1 else WORKERS
     private val workers = if (mode == EncodeMode.HW_JPEG) {
         null
     } else {
-        Executors.newFixedThreadPool(WORKERS) { r -> Thread(r, "frame-encoder") }
+        Executors.newFixedThreadPool(workerCount) { r -> Thread(r, "frame-encoder") }
     }
     private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
 
     /** Free plane sets; one more than the workers so the camera never waits. */
     private val freeSets = ArrayDeque<PlaneSet>().apply {
-        repeat(WORKERS + 1) { add(PlaneSet()) }
+        repeat(workerCount + 1) { add(PlaneSet()) }
+    }
+
+    private val avc = if (mode == EncodeMode.H264) {
+        AvcEncoder(width, height, Math.round(params.fps).toInt()) { data, ptsUs, keyFrame ->
+            if (!closed) {
+                sink.onFrame(data, data.size, ptsUs, keyFrame)
+            }
+        }
+    } else {
+        null
     }
 
     private var nextSeq = 0L
@@ -645,6 +673,10 @@ private class FrameEncoder(
     /** Use [transform] from the next frame on. The capture plan must not change. */
     fun setTransform(transform: Transform) {
         xform = makeTransform(transform)
+    }
+
+    fun requestKeyFrame() {
+        avc?.requestKeyFrame()
     }
 
     override fun onImageAvailable(reader: ImageReader) {
@@ -696,7 +728,13 @@ private class FrameEncoder(
     private fun encode(set: PlaneSet, xf: YuvTransform, seq: Long, ptsUs: Long) {
         val start = System.nanoTime()
         try {
-            if (mode == EncodeMode.YUYV) {
+            if (avc != null) {
+                if (!closed && avc.encode(ptsUs) { image -> xf.toImage(set.y!!, set.u!!, set.v!!, image) }) {
+                    recordStats(System.nanoTime() - start)
+                } else {
+                    synchronized(statsLock) { statsBusy++ }
+                }
+            } else if (mode == EncodeMode.YUYV) {
                 val out = ByteArray(width * height * 2)
                 xf.toYuyv(set.y!!, set.u!!, set.v!!, out)
                 deliver(seq, out, out.size, ptsUs, System.nanoTime() - start)
@@ -728,13 +766,18 @@ private class FrameEncoder(
                 break
             }
         }
-        sink.onFrame(data, length, ptsUs)
+        sink.onFrame(data, length, ptsUs, true)
         recordStats(elapsedNs)
     }
 
     override fun close() {
         closed = true
         workers?.shutdown()
+        if (avc != null) {
+            // Let a frame being transformed finish before the codec goes away.
+            workers?.awaitTermination(CLOSE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            avc.close()
+        }
     }
 
     private fun recordStats(elapsedNs: Long) = synchronized(statsLock) {
@@ -769,6 +812,7 @@ private class FrameEncoder(
 
         /** Software JPEG at 1080p takes ~38 ms on the OnePlus 15; two fit 30 fps. */
         private const val WORKERS = 2
+        private const val CLOSE_TIMEOUT_MS = 500L
     }
 }
 

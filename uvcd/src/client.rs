@@ -80,8 +80,9 @@ fn run_source(mut client: Client) -> Result<()> {
                                 *current.lock().unwrap() = Some((stream_id, params));
                             }
                             SourceEvent::StreamStop { .. } => *current.lock().unwrap() = None,
-                            // A test pattern has nothing to adjust.
-                            SourceEvent::Control(_) => {}
+                            // A test pattern has nothing to adjust, and
+                            // can't be H.264.
+                            SourceEvent::Control(_) | SourceEvent::KeyFrame { .. } => {}
                         }
                     }
                     Err(e) => {
@@ -149,6 +150,7 @@ pub fn subcommand_client(cli: &ClientCli) -> Result<()> {
         ClientCommand::Status => match client.request(&Request::GetStatus)? {
             Response::Status(s) => {
                 println!("Enabled: {}", s.enabled);
+                println!("Kernel module: {:?}", s.kernel_module);
                 match s.stream.host_speed {
                     Some(speed) => println!("Host: connected at {speed:?} speed"),
                     None => println!("Host: not connected"),
@@ -159,6 +161,7 @@ pub fn subcommand_client(cli: &ClientCli) -> Result<()> {
                         let kind = match p.kind {
                             FormatKind::Mjpeg => "MJPEG",
                             FormatKind::Yuyv => "YUYV",
+                            FormatKind::H264 => "H.264",
                         };
                         println!("Streaming: {kind} {}x{} @ {fps:.0} fps", p.width, p.height);
                         println!(
@@ -177,6 +180,7 @@ pub fn subcommand_client(cli: &ClientCli) -> Result<()> {
                 maxburst: opts.maxburst as u8,
                 formats: build_specs(&opts.formats, &opts.mjpeg_fps),
                 controls: Default::default(),
+                kernel_module: opts.formats.contains(&FormatKind::H264),
             }))?)
         }
         ClientCommand::Disable => expect_ok(client.request(&Request::Disable)?),

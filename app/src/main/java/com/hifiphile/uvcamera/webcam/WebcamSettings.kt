@@ -63,7 +63,7 @@ class WebcamSettings(context: Context) {
         return l
     }
 
-    /** Listen for camera or resolution cap changes. */
+    /** Listen for camera, resolution cap or kernel module changes. */
     fun onSourceChanged(listener: () -> Unit): SharedPreferences.OnSharedPreferenceChangeListener {
         val l = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key in SOURCE_KEYS) listener()
@@ -74,6 +74,14 @@ class WebcamSettings(context: Context) {
 
     fun removeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) =
         prefs.unregisterOnSharedPreferenceChangeListener(listener)
+
+    /**
+     * Use UVCamera's kernel module (the daemon loads it): bulk transfers and
+     * an H.264 format.
+     */
+    var kernelModule: Boolean
+        get() = prefs.getBoolean(KEY_KERNEL_MODULE, false)
+        set(value) = prefs.edit { putBoolean(KEY_KERNEL_MODULE, value) }
 
     var maxResolution: MaxResolution
         get() = prefs.getString(KEY_MAX_RESOLUTION, null)
@@ -88,8 +96,9 @@ class WebcamSettings(context: Context) {
         private const val KEY_ROTATION = "rotation"
         private const val KEY_MIRROR_H = "mirror_h"
         private const val KEY_MIRROR_V = "mirror_v"
+        private const val KEY_KERNEL_MODULE = "kernel_module"
         private val TRANSFORM_KEYS = setOf(KEY_ROTATION, KEY_MIRROR_H, KEY_MIRROR_V)
-        private val SOURCE_KEYS = setOf(KEY_CAMERA_ID, KEY_MAX_RESOLUTION)
+        private val SOURCE_KEYS = setOf(KEY_CAMERA_ID, KEY_MAX_RESOLUTION, KEY_KERNEL_MODULE)
 
         /**
          * Clockwise rotation that makes [camera]'s frames upright with the

@@ -423,6 +423,10 @@ impl Streamer {
     /// frame as soon as it arrives, otherwise, once due, a repeat of the last
     /// app frame or the placeholder pattern.
     fn feed_frame(&mut self) -> Result<()> {
+        if !self.stream.as_ref().unwrap().params.kind.is_intra_only() {
+            return self.feed_in_order();
+        }
+
         let stream = self.stream.as_mut().unwrap();
         let now = Instant::now();
 
@@ -513,18 +517,77 @@ impl Streamer {
 
         Ok(())
     }
+
+    /// For formats whose frames depend on each other (H.264): queue every
+    /// app frame in order while buffers are free. Nothing is repeated and
+    /// there is no placeholder; the host waits for the app's first frame.
+    fn feed_in_order(&mut self) -> Result<()> {
+        let stream = self.stream.as_mut().unwrap();
+        // Frames arrive through the source notification, not on a schedule.
+        stream.next_due = Instant::now() + MAX_WAIT;
+
+        while !stream.free.is_empty() {
+            let Some((frame, arrived)) = self.source.take(stream.stream_id) else {
+                return Ok(());
+            };
+            let now = Instant::now();
+            if !frame_is_valid(&stream.params, &frame.data) {
+                stream.stats.invalid += 1;
+                continue;
+            }
+            stream.stats.fresh += 1;
+            let capture_us = monotonic_us().saturating_sub(frame.pts_us);
+            if capture_us < 10_000_000 {
+                let latency = Duration::from_micros(capture_us);
+                stream.stats.latency_total += latency;
+                stream.stats.latency_max = stream.stats.latency_max.max(latency);
+            }
+            stream.stats.wait_total += now.duration_since(arrived);
+
+            let index = stream.free.pop().unwrap();
+            let buf = self.dev.buffer_mut(index);
+            if frame.data.len() > buf.len() {
+                // Truncating would corrupt the stream as much as dropping.
+                warn!(
+                    "Dropping H.264 frame of {} bytes, larger than the buffer ({})",
+                    frame.data.len(),
+                    buf.len()
+                );
+                stream.free.push(index);
+                stream.stats.invalid += 1;
+                continue;
+            }
+            buf[..frame.data.len()].copy_from_slice(&frame.data);
+            self.dev.queue_buffer(index, frame.data.len())?;
+
+            let produce = now.elapsed();
+            stream.stats.queued += 1;
+            stream.stats.produce_total += produce;
+            stream.stats.produce_max = stream.stats.produce_max.max(produce);
+            stream.last_sent = Some(now);
+            stream.sequence += 1;
+        }
+
+        if self.source.has_frame(stream.stream_id) {
+            stream.stats.starved += 1;
+        }
+        Ok(())
+    }
 }
 
 /// Whether an app frame matches the stream's format: YUYV frames are exactly
-/// two bytes per pixel, MJPEG frames start with a JPEG SOI marker and fit
-/// the negotiated maximum.
+/// two bytes per pixel, MJPEG frames start with a JPEG SOI marker, H.264
+/// frames with an Annex B start code, and compressed frames fit the
+/// negotiated maximum.
 fn frame_is_valid(params: &StreamParams, data: &[u8]) -> bool {
+    let fits = data.len() <= params.max_frame_size as usize;
     match params.kind {
         FormatKind::Yuyv => {
             data.len() == usize::from(params.width) * usize::from(params.height) * 2
         }
-        FormatKind::Mjpeg => {
-            data.starts_with(&[0xff, 0xd8]) && data.len() <= params.max_frame_size as usize
+        FormatKind::Mjpeg => data.starts_with(&[0xff, 0xd8]) && fits,
+        FormatKind::H264 => {
+            (data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])) && fits
         }
     }
 }
@@ -553,5 +616,15 @@ mod tests {
         assert!(frame_is_valid(&mjpeg, &[0xff, 0xd8, 0, 0]));
         assert!(!frame_is_valid(&mjpeg, &[0xff, 0xd8, 0, 0, 0]));
         assert!(!frame_is_valid(&mjpeg, &[0, 0]));
+
+        let h264 = StreamParams {
+            kind: FormatKind::H264,
+            max_frame_size: 6,
+            ..yuyv
+        };
+        assert!(frame_is_valid(&h264, &[0, 0, 0, 1, 0x65, 0]));
+        assert!(frame_is_valid(&h264, &[0, 0, 1, 0x41]));
+        assert!(!frame_is_valid(&h264, &[0, 0, 0, 1, 0x65, 0, 0]));
+        assert!(!frame_is_valid(&h264, &[0xff, 0xd8]));
     }
 }

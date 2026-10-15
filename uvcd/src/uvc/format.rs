@@ -23,14 +23,20 @@ pub enum FormatKind {
     Mjpeg,
     /// Uncompressed YUY2 (packed 4:2:2).
     Yuyv,
+    /// H.264 Annex B access units, as a UVC 1.1 frame-based format. Needs
+    /// the `uvcx` function: older kernels have no frame-based formats.
+    H264,
 }
 
 impl FormatKind {
+    pub const ALL: [Self; 3] = [Self::Mjpeg, Self::Yuyv, Self::H264];
+
     /// V4L2 fourcc passed to `VIDIOC_S_FMT`.
     pub fn fourcc(self) -> u32 {
         u32::from_le_bytes(match self {
             Self::Mjpeg => *b"MJPG",
             Self::Yuyv => *b"YUYV",
+            Self::H264 => *b"H264",
         })
     }
 
@@ -39,6 +45,7 @@ impl FormatKind {
         match self {
             Self::Mjpeg => "mjpeg",
             Self::Yuyv => "uncompressed",
+            Self::H264 => "framebased",
         }
     }
 
@@ -47,14 +54,26 @@ impl FormatKind {
         match self {
             Self::Mjpeg => "m",
             Self::Yuyv => "u",
+            Self::H264 => "h",
         }
     }
 
     /// Upper bound on the size of one frame.
     pub fn max_frame_size(self, width: u16, height: u16) -> u32 {
-        // YUYV is exactly 2 bytes/pixel. MJPEG is bounded by the same so a
-        // worst-case camera frame always fits the V4L2 buffer.
-        u32::from(width) * u32::from(height) * 2
+        let pixels = u32::from(width) * u32::from(height);
+        match self {
+            // YUYV is exactly 2 bytes/pixel. MJPEG is bounded by the same so
+            // a worst-case camera frame always fits the V4L2 buffer.
+            Self::Mjpeg | Self::Yuyv => pixels * 2,
+            // Even an intra frame at a high bitrate is far smaller.
+            Self::H264 => pixels,
+        }
+    }
+
+    /// Whether every frame stands alone, so frames may be dropped or
+    /// repeated. H.264 frames depend on the ones before.
+    pub fn is_intra_only(self) -> bool {
+        self != Self::H264
     }
 }
 
@@ -63,6 +82,7 @@ impl fmt::Display for FormatKind {
         f.write_str(match self {
             Self::Mjpeg => "mjpeg",
             Self::Yuyv => "yuyv",
+            Self::H264 => "h264",
         })
     }
 }
@@ -74,7 +94,8 @@ impl FromStr for FormatKind {
         match s {
             "mjpeg" => Ok(Self::Mjpeg),
             "yuyv" => Ok(Self::Yuyv),
-            _ => bail!("Unknown format: {s:?} (expected mjpeg or yuyv)"),
+            "h264" => Ok(Self::H264),
+            _ => bail!("Unknown format: {s:?} (expected mjpeg, yuyv or h264)"),
         }
     }
 }
@@ -132,7 +153,7 @@ impl FormatSpec {
     /// (~24 MB/s): YUYV is limited to 640×480@30 and 1280×720@10.
     pub fn default_for(kind: FormatKind) -> Self {
         let frames = match kind {
-            FormatKind::Mjpeg => vec![
+            FormatKind::Mjpeg | FormatKind::H264 => vec![
                 FrameSpec::new(1920, 1080, &[30, 15]),
                 FrameSpec::new(1280, 720, &[30, 15]),
                 FrameSpec::new(640, 480, &[30, 15]),

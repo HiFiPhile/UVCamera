@@ -41,6 +41,7 @@ import com.hifiphile.uvcamera.camera.Facing
 import com.hifiphile.uvcamera.camera.Rotation
 import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.FormatKind
+import com.hifiphile.uvcamera.daemon.ModuleState
 import com.hifiphile.uvcamera.daemon.Status
 import com.hifiphile.uvcamera.daemon.StreamParams
 import java.util.Locale
@@ -49,6 +50,7 @@ private fun StreamParams.describe(): String {
     val kind = when (kind) {
         FormatKind.MJPEG -> "MJPEG"
         FormatKind.YUYV -> "YUYV"
+        FormatKind.H264 -> "H.264"
     }
     return "$kind ${width}×$height @ ${String.format(Locale.ROOT, "%.0f", fps)} fps"
 }
@@ -108,7 +110,7 @@ fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
                 )
             }
 
-            WebcamSettingsRows(running = service.running)
+            WebcamSettingsRows(running = service.running, kernelModule = status?.kernelModule)
 
             Row(
                 modifier = Modifier.padding(top = 8.dp),
@@ -153,12 +155,14 @@ private fun facingLabel(facing: Facing) = stringResource(when (facing) {
 })
 
 /**
- * Camera, resolution cap and orientation, all applied live. A change that
- * alters the advertised formats reconnects the webcam on the host.
+ * Camera, resolution cap, kernel module and orientation, all applied live. A
+ * change that alters the advertised formats reconnects the webcam on the
+ * host. The kernel module choice only shows when there is one for this
+ * kernel ([kernelModule] from the daemon).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun WebcamSettingsRows(running: Boolean) {
+private fun WebcamSettingsRows(running: Boolean, kernelModule: ModuleState?) {
     val context = LocalContext.current
     val settings = remember { WebcamSettings(context) }
     val cameras = remember {
@@ -172,6 +176,7 @@ private fun WebcamSettingsRows(running: Boolean) {
     var rotation by remember { mutableStateOf(settings.rotation) }
     var mirrorH by remember { mutableStateOf(settings.mirrorH) }
     var mirrorV by remember { mutableStateOf(settings.mirrorV) }
+    var useKernelModule by remember { mutableStateOf(settings.kernelModule) }
 
     Text(
         stringResource(R.string.webcam_settings_camera),
@@ -206,6 +211,23 @@ private fun WebcamSettingsRows(running: Boolean) {
                 label = { Text(resolution.label) },
             )
         }
+    }
+
+    if (kernelModule != null && kernelModule != ModuleState.UNAVAILABLE) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = useKernelModule,
+                onClick = {
+                    useKernelModule = !useKernelModule
+                    settings.kernelModule = useKernelModule
+                },
+                label = { Text(stringResource(R.string.webcam_kernel_module)) },
+            )
+        }
+        Text(
+            stringResource(R.string.webcam_kernel_module_hint),
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 
     if (running) {

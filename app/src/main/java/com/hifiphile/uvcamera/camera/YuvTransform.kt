@@ -178,6 +178,61 @@ class YuvTransform(
         }
     }
 
+    /**
+     * Transform into [image], a YUV 4:2:0 image of the output size with any
+     * plane layout (a codec's input image).
+     */
+    fun toImage(y: Plane, u: Plane, v: Plane, image: android.media.Image) {
+        val yw = lumaWalk(y)
+        val cw = chromaWalk(u)
+        val planes = image.planes
+        val row = ByteArray(outWidth)
+
+        val yOut = planes[0].buffer
+        val yRowStride = planes[0].rowStride
+        val yPixelStride = planes[0].pixelStride
+        for (r in 0 until outHeight) {
+            var i = yw.starts[r]
+            val step = yw.steps[r]
+            val base = r * yRowStride
+            if (yPixelStride == 1) {
+                if (step == 1) {
+                    System.arraycopy(y.data, i, row, 0, outWidth)
+                } else {
+                    for (c in 0 until outWidth) {
+                        row[c] = y.data[i]
+                        i += step
+                    }
+                }
+                yOut.position(base)
+                yOut.put(row, 0, outWidth)
+            } else {
+                for (c in 0 until outWidth) {
+                    yOut.put(base + c * yPixelStride, y.data[i])
+                    i += step
+                }
+            }
+        }
+
+        val uOut = planes[1].buffer
+        val vOut = planes[2].buffer
+        val cRowStride = planes[1].rowStride
+        val cPixelStride = planes[1].pixelStride
+        val ud = u.data
+        val vd = v.data
+        for (r in 0 until outHeight / 2) {
+            var i = cw.starts[r]
+            val step = cw.steps[r]
+            var o = r * cRowStride
+            for (c in 0 until outWidth / 2) {
+                uOut.put(o, ud[i])
+                vOut.put(o, vd[i])
+                o += cPixelStride
+                i += step
+            }
+        }
+    }
+
     /** Transform to packed YUYV 4:2:2, repeating each chroma row twice. */
     fun toYuyv(y: Plane, u: Plane, v: Plane, out: ByteArray) {
         require(out.size >= outWidth * outHeight * 2) { "Output too small" }

@@ -6,35 +6,67 @@ package com.hifiphile.uvcamera.webcam
 import android.util.Log
 import com.hifiphile.uvcamera.daemon.SourceChannel
 import java.io.IOException
+import java.util.ArrayDeque
 
 /**
- * Sends frames to the daemon from its own thread, keeping at most one
- * pending frame: if the socket is slower than the camera, stale frames are
- * replaced rather than queued, so latency stays at one frame.
+ * Sends frames to the daemon from its own thread. Frames that stand alone
+ * replace each other: if the socket is slower than the camera, stale frames
+ * are dropped rather than queued, so latency stays at one frame. Frames that
+ * depend on the previous ones (H.264) queue in order; if the queue backs up,
+ * it is dropped up to the next key frame, which [onBacklog] should ask for.
  */
-class FrameSender(private val channel: SourceChannel, private val onFailure: (IOException) -> Unit) {
+class FrameSender(
+    private val channel: SourceChannel,
+    private val onBacklog: () -> Unit,
+    private val onFailure: (IOException) -> Unit,
+) {
     private class Pending(val streamId: Int, val data: ByteArray, val length: Int, val ptsUs: Long)
 
     private val lock = Object()
-    private var pending: Pending? = null
+    private val queue = ArrayDeque<Pending>()
+    private var waitingForKeyFrame = false
     private var closed = false
 
     private val thread = Thread(::run, "frame-sender").apply { start() }
 
-    fun offer(streamId: Int, data: ByteArray, length: Int, ptsUs: Long) {
+    /**
+     * Queue a frame. [ordered] frames depend on the ones before; [keyFrame]
+     * says whether this one starts over.
+     */
+    fun offer(streamId: Int, data: ByteArray, length: Int, ptsUs: Long, ordered: Boolean, keyFrame: Boolean) {
+        var backlog = false
         synchronized(lock) {
             if (closed) {
                 return
             }
-            pending = Pending(streamId, data, length, ptsUs)
-            lock.notifyAll()
+            if (!ordered) {
+                queue.clear()
+            } else {
+                if (waitingForKeyFrame && !keyFrame) {
+                    return
+                }
+                waitingForKeyFrame = false
+                if (queue.size >= MAX_QUEUED && !keyFrame) {
+                    Log.w(TAG, "Dropping ${queue.size} queued frames until the next key frame")
+                    queue.clear()
+                    waitingForKeyFrame = true
+                    backlog = true
+                }
+            }
+            if (!backlog) {
+                queue.addLast(Pending(streamId, data, length, ptsUs))
+                lock.notifyAll()
+            }
+        }
+        if (backlog) {
+            onBacklog()
         }
     }
 
     fun close() {
         synchronized(lock) {
             closed = true
-            pending = null
+            queue.clear()
             lock.notifyAll()
         }
         thread.join(1000)
@@ -43,13 +75,13 @@ class FrameSender(private val channel: SourceChannel, private val onFailure: (IO
     private fun run() {
         while (true) {
             val frame = synchronized(lock) {
-                while (pending == null && !closed) {
+                while (queue.isEmpty() && !closed) {
                     lock.wait()
                 }
                 if (closed) {
                     return
                 }
-                pending.also { pending = null }!!
+                queue.removeFirst()
             }
 
             try {
@@ -65,5 +97,8 @@ class FrameSender(private val channel: SourceChannel, private val onFailure: (IO
 
     companion object {
         private const val TAG = "FrameSender"
+
+        /** About a quarter second at 30 fps. */
+        private const val MAX_QUEUED = 8
     }
 }

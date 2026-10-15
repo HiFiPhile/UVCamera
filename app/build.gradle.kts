@@ -283,6 +283,12 @@ androidComponents.onVariants { variant ->
             }
         }
 
+        // usb_f_uvcx builds from kmod/build.sh, one per GKI kernel module
+        // interface; uvcd loads the one matching the kernel when asked to.
+        from(File(rootDir, "kmod/out")) {
+            include("*.ko")
+        }
+
         from(File(moduleDir, "customize.sh"))
         from(File(moduleDir, "post-fs-data.sh"))
         from(File(moduleDir, "service.sh"))

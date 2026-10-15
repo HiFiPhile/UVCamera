@@ -20,14 +20,15 @@ class MessageTest {
             2,
             listOf(FormatSpec(FormatKind.MJPEG, listOf(FrameSpec(640, 480, listOf(333_333))))),
             ControlCaps(zoom = 60 to 1000, focus = true, powerLine = true),
+            kernelModule = true,
         ).write(Writer(out))
 
         // Same bytes as uvcd's message.rs: formats, then control flags 1|2|8
-        // and the zoom range.
+        // and the zoom range, then the kernel module option.
         assertArrayEquals(
             bytes(
                 2, 2, 1, 0, 1, 0x80, 0x02, 0xe0, 0x01, 1, 0x15, 0x16, 0x05, 0x00,
-                0x0b, 60, 0, 0xe8, 0x03,
+                0x0b, 60, 0, 0xe8, 0x03, 1,
             ),
             out.toByteArray(),
         )
@@ -38,7 +39,7 @@ class MessageTest {
         val data = bytes(
             1, 1, 5, 1, 1, 0x80, 0x02, 0xe0, 0x01, 0x15, 0x16, 0x05, 0x00,
             0x00, 0x60, 0x09, 0x00, 0x06, 0x75, 0x00, 0x00, 0x3c, 0x73, 0x00, 0x00,
-            0x03, 0, 0, 0,
+            0x03, 0, 0, 0, 1,
         )
 
         val response = Response.read(Reader(ByteArrayInputStream(data)))
@@ -51,6 +52,7 @@ class MessageTest {
                 fps = 29.958,
                 sourceFps = 29.5,
                 failed = 3,
+                kernelModule = ModuleState.AVAILABLE,
             )),
             response,
         )
@@ -82,6 +84,10 @@ class MessageTest {
         assertEquals(
             SourceEvent.Control(ControlIds.BRIGHTNESS, 200),
             SourceEvent.read(Reader(ByteArrayInputStream(bytes(3, 1, 200, 0, 0, 0)))),
+        )
+        assertEquals(
+            SourceEvent.KeyFrame(7),
+            SourceEvent.read(Reader(ByteArrayInputStream(bytes(4, 7, 0, 0, 0)))),
         )
     }
 
