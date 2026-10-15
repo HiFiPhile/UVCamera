@@ -102,8 +102,8 @@ impl Session {
             device_class: gadget.device_class()?,
         };
 
-        let attach = || -> Result<(FormatTable, EntityIds)> {
-            let (table, entities) =
+        let attach = || -> Result<(FormatTable, EntityIds, ControlCaps)> {
+            let (table, entities, controls) =
                 gadget.create_function(&config.specs, &config.endpoint, &config.controls)?;
             info!("Created UVC function: {table:?}");
 
@@ -115,10 +115,10 @@ impl Session {
             gadget.set_udc(Some(&udc))?;
             info!("Bound gadget to {udc}");
 
-            Ok((table, entities))
+            Ok((table, entities, controls))
         };
 
-        let (table, entities) = match attach() {
+        let (table, entities, controls) = match attach() {
             Ok(r) => r,
             Err(e) => {
                 if let Err(te) = teardown(&gadget, Some(&original)) {
@@ -133,7 +133,7 @@ impl Session {
         let thread = {
             let server = Server {
                 gadget: gadget.clone(),
-                controls: config.controls,
+                controls,
                 table,
                 entities,
                 endpoint: config.endpoint,

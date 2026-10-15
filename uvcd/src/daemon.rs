@@ -6,7 +6,9 @@
 //! The daemon the app talks to. It runs in the `uvcamera_daemon` SELinux
 //! domain as the system user with only CAP_CHOWN (configfs creates nodes as
 //! root) and CAP_SYS_NICE (USB IRQ thread priority), plus the readproc group
-//! to see kernel threads in /proc. It owns at most one gadget [`Session`].
+//! to see kernel threads in /proc. Where the gadget belongs to root rather
+//! than system (phones whose gadget HAL owns it), it also keeps
+//! CAP_DAC_OVERRIDE to work in it. It owns at most one gadget [`Session`].
 //!
 //! A root `app_process` supervisor started it and answers, over inherited
 //! pipes, whether a peer UID belongs to the UVCamera package signed with the
@@ -18,7 +20,7 @@ use std::{
     fs::File,
     io,
     os::unix::net::{SocketAddr, UnixListener, UnixStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -83,19 +85,30 @@ fn check_selinux() -> Result<()> {
     }
 }
 
+/// Whether the system user can work in the gadget without bypassing file
+/// permissions: Android's init usually hands it to system, but where a
+/// gadget HAL manages it, it can stay root's (0770, attributes 0644).
+fn gadget_owned_by_system(gadget: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata =
+        std::fs::metadata(gadget).with_context(|| format!("Failed to stat {gadget:?}"))?;
+    Ok(metadata.uid() == SYSTEM_UID)
+}
+
 /// Switch from root to the system user, keeping only the capabilities we
-/// need. Must run before any other thread exists, since the credential
-/// syscalls only affect the calling thread.
-fn drop_privileges() -> Result<()> {
+/// need, plus `extra`. Must run before any other thread exists, since the
+/// credential syscalls only affect the calling thread.
+fn drop_privileges(extra: CapabilitySet) -> Result<()> {
     let system_uid = Uid::from_raw(SYSTEM_UID);
     let system_gid = Gid::from_raw(SYSTEM_UID);
-    let needed = CapabilitySet::CHOWN | CapabilitySet::SYS_NICE;
+    let needed = CapabilitySet::CHOWN | CapabilitySet::SYS_NICE | extra;
 
     let uid = rustix::process::getuid();
     if uid == system_uid {
         let caps = rustix::thread::capabilities(None).context("Failed to query capabilities")?;
         if !caps.permitted.contains(needed) {
-            bail!("CAP_CHOWN and CAP_SYS_NICE are required when running as the system user");
+            bail!("Missing capabilities when running as the system user: need {needed:?}");
         }
     } else if uid.is_root() {
         rustix::thread::set_keep_capabilities(true)
@@ -290,7 +303,15 @@ impl Daemon {
 pub fn subcommand_daemon(cli: &DaemonCli) -> Result<()> {
     // Grab the supervisor pipes and drop root before anything else.
     let auth = Authenticator::new()?;
-    drop_privileges()?;
+    let root_owned = !gadget_owned_by_system(&cli.gadget)?;
+    drop_privileges(if root_owned {
+        CapabilitySet::DAC_OVERRIDE
+    } else {
+        CapabilitySet::empty()
+    })?;
+    if root_owned {
+        info!("{:?} belongs to root; keeping CAP_DAC_OVERRIDE", cli.gadget);
+    }
 
     let gadget = Gadget::new(&cli.gadget, &cli.config)?;
     if gadget.function_exists() || gadget.is_linked() {

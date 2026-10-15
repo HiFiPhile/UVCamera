@@ -48,6 +48,15 @@ fn write_attr(path: &Path, value: &str) -> Result<()> {
     fs::write(path, value).with_context(|| format!("Failed to write {value:?} to {path:?}"))
 }
 
+/// Whether a configfs attribute can be written: attributes without a store
+/// method have no write bits (and refuse writes even with CAP_DAC_OVERRIDE).
+fn is_writable(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path).with_context(|| format!("Failed to stat {path:?}"))?;
+    Ok(metadata.permissions().mode() & 0o222 != 0)
+}
+
 fn parse_u8(s: &str) -> Result<u8> {
     let parsed = match s.strip_prefix("0x") {
         Some(hex) => u8::from_str_radix(hex, 16),
@@ -226,27 +235,39 @@ impl Gadget {
     }
 
     /// Create the UVC function with the given formats. Returns the format
-    /// table with kernel-assigned indexes and the VideoControl entity IDs.
+    /// table with kernel-assigned indexes, the VideoControl entity IDs and
+    /// the controls actually advertised (see below).
     pub fn create_function(
         &self,
         specs: &[FormatSpec],
         endpoint: &EndpointConfig,
         controls: &ControlCaps,
-    ) -> Result<(FormatTable, EntityIds)> {
+    ) -> Result<(FormatTable, EntityIds, ControlCaps)> {
         let f = self.function_dir();
         mkdir(&f)?;
 
-        // Advertise the controls the camera supports. Writable since Linux
-        // 6.x (the OnePlus 15's 6.12 GKI allows it).
+        // Advertise the controls the camera supports. The bitmaps are
+        // writable since Linux 6.x (the OnePlus 15's 6.12 GKI allows it);
+        // older kernels keep their defaults, brightness and AE mode, which
+        // is what no optional controls means.
         let bitmap = |bytes: Vec<u8>| bytes.iter().map(|b| format!("{b}\n")).collect::<String>();
-        write_attr(
-            &f.join("control/terminal/camera/default/bmControls"),
-            &bitmap(controls.camera_terminal_bm_controls()),
-        )?;
-        write_attr(
-            &f.join("control/processing/default/bmControls"),
-            &bitmap(controls.processing_unit_bm_controls()),
-        )?;
+        let terminal_controls = f.join("control/terminal/camera/default/bmControls");
+        let controls = if is_writable(&terminal_controls)? {
+            write_attr(
+                &terminal_controls,
+                &bitmap(controls.camera_terminal_bm_controls()),
+            )?;
+            write_attr(
+                &f.join("control/processing/default/bmControls"),
+                &bitmap(controls.processing_unit_bm_controls()),
+            )?;
+            *controls
+        } else {
+            if *controls != ControlCaps::default() {
+                warn!("This kernel's UVC controls are fixed: advertising brightness only");
+            }
+            ControlCaps::default()
+        };
 
         let transfer = f.join("streaming_transfer");
         match endpoint.transfer {
@@ -375,7 +396,7 @@ impl Gadget {
             processing_unit: parse_u8(&read_attr(&control.join("processing/default/bUnitID"))?)?,
         };
 
-        Ok((FormatTable::new(formats)?, entities))
+        Ok((FormatTable::new(formats)?, entities, controls))
     }
 
     /// Remove the UVC function, including partially created ones. The

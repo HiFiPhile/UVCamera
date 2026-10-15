@@ -199,6 +199,8 @@ pub fn subcommand_sepatch(cli: &SepatchCli) -> Result<()> {
         c_capability,
         ["chown", "setuid", "setgid", "sys_nice"]
     );
+    // Only used where the gadget belongs to root (see daemon.rs).
+    allow!(t_daemon, t_daemon, c_capability, ["dac_override"]);
     allow!(
         t_daemon,
         t_daemon,
