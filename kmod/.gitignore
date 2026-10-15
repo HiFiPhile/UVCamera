@@ -6,3 +6,4 @@
 .module-common.o
 Module.symvers
 modules.order
+out/

@@ -37,6 +37,10 @@ kernel mapping, which scatter-gather buffers lack.
 Source: torvalds/linux 045958acaa75 (v7.3-rc7). Licensed GPL-2.0, like the
 kernel it is part of.
 
+Frame-based frames also take `dwMaxVideoFrameBufferSize` here. It isn't in
+their descriptor, but sizes the V4L2 buffers, which upstream leaves at a
+fixed 460800 bytes for every frame-based frame.
+
 ## Building for the OnePlus 15 (GKI android16-6.12)
 
 The module must match the kernel's KMI: build it against the same
@@ -44,9 +48,14 @@ The module must match the kernel's KMI: build it against the same
 that build's `vmlinux.symvers`.
 
 ```bash
-. ~/Android/gki/env.sh
-make $GKI_MAKE_ARGS M=$PWD modules
+kmod/build.sh
 ```
+
+This builds against the tree described below and writes
+`out/usb_f_uvcx.<KMI>.ko` (`GKI_KMI` in `~/Android/gki/env.sh`, e.g.
+`android16-6.12-6`: Android release, kernel version, KMI generation), which
+the module zip includes. uvcd loads the one matching the running kernel
+when the app enables the webcam with H.264.
 
 `~/Android/gki` holds `kernel/common` at 925a103d123c (from
 `/proc/version`), clang r536225, the phone's `/proc/config.gz` as

@@ -2139,6 +2139,11 @@ static struct configfs_attribute *uvcg_frame_attrs2[] = {
 	&uvcg_frame_attr_dw_default_frame_interval,
 	&uvcg_frame_attr_dw_frame_interval,
 	&uvcg_frame_attr_dw_bytes_perline,
+	/*
+	 * Not in the frame-based frame descriptor, but the V4L2 buffer size
+	 * for the frame: without it every frame-based frame gets the default.
+	 */
+	&uvcg_frame_attr_dw_max_video_frame_buffer_size,
 	NULL,
 };
 
