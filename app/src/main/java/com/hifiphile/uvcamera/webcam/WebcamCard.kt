@@ -22,11 +22,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
@@ -53,8 +55,9 @@ private fun StreamParams.describe(): String {
     return "$kind ${width}×$height @ ${String.format(Locale.ROOT, "%.0f", fps)} fps"
 }
 
+/** The webcam's state and the switch to turn it on or off. */
 @Composable
-fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
+fun WebcamStatusCard(viewModel: WebcamViewModel = viewModel()) {
     val context = LocalContext.current
     val daemon by viewModel.daemon.collectAsStateWithLifecycle()
     val service by WebcamService.state.collectAsStateWithLifecycle()
@@ -79,16 +82,56 @@ fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(
-                stringResource(R.string.webcam_title),
-                style = MaterialTheme.typography.titleMedium,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    stringResource(R.string.webcam_title),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                if (service.running) {
+                    OutlinedButton(onClick = { WebcamService.stop(context) }) {
+                        Text(stringResource(R.string.webcam_disable))
+                    }
+                } else {
+                    // Enabled without the app (test pattern, or the app was
+                    // restarted): turning on attaches the camera to it.
+                    if (status?.enabled == true) {
+                        TextButton(onClick = { WebcamService.stop(context) }) {
+                            Text(stringResource(R.string.webcam_disable))
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            val granted = ContextCompat.checkSelfPermission(
+                                context, Manifest.permission.CAMERA,
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (granted) {
+                                WebcamService.start(context)
+                            } else {
+                                permissions.launch(buildList {
+                                    add(Manifest.permission.CAMERA)
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        add(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                }.toTypedArray())
+                            }
+                        },
+                        enabled = status != null,
+                    ) {
+                        Text(stringResource(R.string.webcam_enable))
+                    }
+                }
+            }
 
             when (val state = daemon) {
                 DaemonState.Connecting -> Text(stringResource(R.string.webcam_connecting))
                 is DaemonState.Unavailable -> {
                     Text(stringResource(R.string.webcam_unavailable))
-                    Text(state.reason, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        state.reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 is DaemonState.Connected -> StatusRows(state.status, service)
             }
@@ -107,40 +150,25 @@ fun WebcamCard(viewModel: WebcamViewModel = viewModel()) {
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+        }
+    }
+}
 
+/** Camera, resolution and orientation, all applied live. */
+@Composable
+fun WebcamSettingsCard() {
+    val service by WebcamService.state.collectAsStateWithLifecycle()
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                stringResource(R.string.webcam_settings_title),
+                style = MaterialTheme.typography.titleMedium,
+            )
             WebcamSettingsRows(running = service.running)
-
-            Row(
-                modifier = Modifier.padding(top = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(
-                    onClick = {
-                        val granted = ContextCompat.checkSelfPermission(
-                            context, Manifest.permission.CAMERA,
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (granted) {
-                            WebcamService.start(context)
-                        } else {
-                            permissions.launch(buildList {
-                                add(Manifest.permission.CAMERA)
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    add(Manifest.permission.POST_NOTIFICATIONS)
-                                }
-                            }.toTypedArray())
-                        }
-                    },
-                    enabled = status != null && !service.running,
-                ) {
-                    Text(stringResource(R.string.webcam_enable))
-                }
-                OutlinedButton(
-                    onClick = { WebcamService.stop(context) },
-                    enabled = service.running || status?.enabled == true,
-                ) {
-                    Text(stringResource(R.string.webcam_disable))
-                }
-            }
         }
     }
 }
@@ -194,6 +222,7 @@ private fun WebcamSettingsRows(running: Boolean) {
     Text(
         stringResource(R.string.webcam_settings_max_resolution),
         style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.padding(top = 8.dp),
     )
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         for (resolution in MaxResolution.entries) {
@@ -212,6 +241,7 @@ private fun WebcamSettingsRows(running: Boolean) {
         Text(
             stringResource(R.string.webcam_settings_reconnect),
             style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 
@@ -253,6 +283,7 @@ private fun WebcamSettingsRows(running: Boolean) {
     Text(
         stringResource(R.string.webcam_settings_orientation_hint),
         style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
@@ -289,6 +320,7 @@ private fun StatusRows(status: Status, service: WebcamState) {
                 status.failed,
             ),
             style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

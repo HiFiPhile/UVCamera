@@ -2,6 +2,8 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 <resources>
     <string name="app_name" translatable="false">UVCamera</string>
+    <string name="tab_webcam">Webcam</string>
+    <string name="tab_device">Device</string>
     <string name="webcam_title">USB webcam</string>
     <string name="webcam_connecting">Connecting to uvcd…</string>
     <string name="webcam_unavailable">The webcam service isn\'t available. Check that the UVCamera module is installed and enabled.</string>
@@ -20,20 +22,31 @@
     <string name="webcam_camera_permission">The camera permission is needed to use the phone as a webcam.</string>
     <string name="webcam_settings_camera">Camera</string>
     <string name="webcam_settings_max_resolution">Maximum resolution</string>
-    <string name="webcam_settings_reconnect">Changing the resolution reconnects the webcam on the computer.</string>
+    <string name="webcam_settings_title">Settings</string>
+    <string name="webcam_settings_reconnect">Changing the camera\'s formats or the resolution reconnects the webcam on the computer.</string>
     <string name="webcam_settings_orientation">Orientation</string>
     <string name="webcam_rotation_chip">%1$d°</string>
     <string name="webcam_mirror_h">Mirror ↔</string>
     <string name="webcam_mirror_v">Mirror ↕</string>
-    <string name="webcam_settings_orientation_hint">0° is upright with the phone in landscape, top to the left. 90° and 270° are for a phone standing in portrait; the host still gets a landscape picture (the middle band). Changes apply immediately.</string>
+    <string name="webcam_settings_orientation_hint">0° is upright with the phone in landscape, top to the left. Use 90° or 270° for a phone standing in portrait: the computer still gets a landscape picture, the middle band.</string>
     <string name="webcam_camera_chip">%1$s (%2$s)</string>
-    <string name="webcam_enable">Enable</string>
-    <string name="webcam_disable">Disable</string>
+    <string name="webcam_enable">Turn on</string>
+    <string name="webcam_disable">Turn off</string>
     <string name="notification_channel_webcam">Webcam</string>
     <string name="notification_title">USB webcam is on</string>
     <string name="notification_text">The camera turns on when an app on the host uses it.</string>
     <string name="notification_stop">Turn off</string>
     <string name="cameras_title">UVCamera</string>
+    <string name="system_title">System</string>
+    <string name="system_device">Device</string>
+    <string name="system_android">Android</string>
+    <string name="system_android_version">%1$s (API %2$d)</string>
+    <string name="system_kernel">Kernel</string>
+    <string name="system_app">App</string>
+    <string name="system_daemon">Daemon</string>
+    <string name="system_daemon_connecting">Connecting…</string>
+    <string name="system_daemon_running">Running</string>
+    <string name="system_daemon_unavailable">Not available: %1$s</string>
     <string name="cameras_heading">Camera capabilities</string>
     <string name="cameras_subtitle">Sizes each camera can stream at 30 fps or faster. These are the candidates to advertise to the USB host.</string>
     <string name="cameras_none">No cameras found</string>
