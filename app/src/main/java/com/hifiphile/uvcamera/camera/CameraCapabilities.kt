@@ -36,6 +36,11 @@ data class CameraInfo(
     val sensorOrientation: Int,
     /** Per format, sizes that can sustain [TARGET_FRAME_DURATION_NS], largest first. */
     val streamableSizes: Map<StreamFormat, List<Resolution>>,
+    /**
+     * Per format, sizes that can sustain [FAST_FRAME_DURATION_NS]; empty if
+     * auto exposure can't hold 60 fps.
+     */
+    val fastSizes: Map<StreamFormat, List<Resolution>> = emptyMap(),
     /** CONTROL_ZOOM_RATIO_RANGE, e.g. 0.6 to 10 on a logical multi-camera. */
     val zoomRatioRange: Pair<Float, Float>? = null,
     /** Nearest focus distance in diopters; 0 for fixed focus. */
@@ -52,6 +57,9 @@ data class CameraInfo(
 
 /** 30 fps, the baseline frame rate every advertised UVC frame size must meet. */
 const val TARGET_FRAME_DURATION_NS = 1_000_000_000L / 30
+
+/** 60 fps, with the slack for UVC's truncated interval (see `maxFrameDurationNs`). */
+const val FAST_FRAME_DURATION_NS = 1_000_000_000L / 60 + 99
 
 /**
  * Filter [sizes] to those whose minimum frame duration allows [maxFrameDurationNs], ordered from
@@ -86,14 +94,17 @@ fun queryCameras(manager: CameraManager): List<CameraInfo> = manager.cameraIdLis
         else -> Facing.EXTERNAL
     }
 
-    val sizes = StreamFormat.entries.associateWith { format ->
+    fun sizesAt(maxFrameDurationNs: Long) = StreamFormat.entries.associateWith { format ->
         val outputSizes = map?.getOutputSizes(format.imageFormat).orEmpty()
             .associateBy { Resolution(it.width, it.height) }
 
-        streamableSizes(outputSizes.keys.toList(), TARGET_FRAME_DURATION_NS) {
+        streamableSizes(outputSizes.keys.toList(), maxFrameDurationNs) {
             map!!.getOutputMinFrameDuration(format.imageFormat, outputSizes.getValue(it))
         }
     }
+    val sizes = sizesAt(TARGET_FRAME_DURATION_NS)
+    val ae60 = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        .orEmpty().any { it.upper >= 60 }
 
     CameraInfo(
         id = id,
@@ -102,6 +113,7 @@ fun queryCameras(manager: CameraManager): List<CameraInfo> = manager.cameraIdLis
             chars.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)),
         sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
         streamableSizes = sizes,
+        fastSizes = if (ae60) sizesAt(FAST_FRAME_DURATION_NS) else emptyMap(),
         zoomRatioRange = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
             ?.let { it.lower to it.upper },
         minFocusDistance = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,

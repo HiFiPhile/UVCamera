@@ -98,6 +98,31 @@ class WebcamFormatsTest {
     }
 
     @Test
+    fun sixtyFpsWhereTheCameraCan() {
+        val sizes = listOf(Resolution(1920, 1080), Resolution(1280, 720), Resolution(640, 480))
+        // OnePlus 15 back camera: JPEG and YUV at 1080p60, YUV at 720p60; not 480p.
+        val oneplus = camera(jpeg = sizes, yuv = sizes).copy(
+            fastSizes = mapOf(
+                StreamFormat.JPEG to listOf(Resolution(1920, 1080)),
+                StreamFormat.YUV to listOf(Resolution(1920, 1080), Resolution(1280, 720)),
+            ),
+        )
+        assertEquals(true, supports60Fps(oneplus))
+
+        val mjpeg = webcamFormats(oneplus, fps60 = true)[0]
+        assertEquals(
+            listOf(listOf(166_666, 333_333, 666_666), listOf(166_666, 333_333, 666_666), listOf(333_333, 666_666)),
+            mjpeg.frames.map { it.intervals },
+        )
+        // Off: 30 fps everywhere. YUYV never gets 60.
+        assertEquals(webcamFormats(camera(jpeg = sizes, yuv = sizes)), webcamFormats(oneplus, fps60 = false))
+        assertEquals(listOf(333_333, 666_666), webcamFormats(oneplus, fps60 = true)[1].frames[0].intervals)
+
+        // The Nothing Phone (2): no 60 fps auto exposure range, so no fast sizes.
+        assertEquals(false, supports60Fps(camera(jpeg = sizes, yuv = sizes)))
+    }
+
+    @Test
     fun nothingUsableFallsBackToDefaults() {
         assertEquals(FormatSpec.defaults(), webcamFormats(camera(emptyList(), emptyList())))
     }

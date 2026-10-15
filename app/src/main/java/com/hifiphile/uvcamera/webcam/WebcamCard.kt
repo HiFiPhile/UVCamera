@@ -204,6 +204,7 @@ private fun WebcamSettingsRows() {
     var cameraId by remember {
         mutableStateOf(WebcamSettings.pickCamera(cameras, settings.cameraId)?.id)
     }
+    var fps60 by remember { mutableStateOf(settings.fps60) }
     var maxResolution by remember { mutableStateOf(settings.maxResolution) }
     var rotation by remember { mutableStateOf(settings.rotation) }
     var mirrorH by remember { mutableStateOf(settings.mirrorH) }
@@ -242,6 +243,26 @@ private fun WebcamSettingsRows() {
                 },
                 label = { Text(resolution.label) },
             )
+        }
+    }
+
+    if (cameras.find { it.id == cameraId }?.let(::supports60Fps) == true) {
+        Text(
+            stringResource(R.string.webcam_settings_frame_rate),
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for ((fps, fast) in listOf(30 to false, 60 to true)) {
+                FilterChip(
+                    selected = fps60 == fast,
+                    onClick = {
+                        fps60 = fast
+                        settings.fps60 = fast
+                    },
+                    label = { Text(stringResource(R.string.webcam_fps_chip, fps)) },
+                )
+            }
         }
     }
 

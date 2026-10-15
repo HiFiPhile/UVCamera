@@ -181,7 +181,7 @@ class WebcamService : Service() {
         val controls = webcamControls(cameras)
         synchronized(lock) {
             camera = WebcamSettings.pickCamera(cameras, settings.cameraId)!!
-            formats = webcamFormats(camera, settings.maxResolution.height)
+            formats = webcamFormats(camera, settings.maxResolution.height, settings.fps60)
             transform = transformFor(camera, settings)
             streamer = CameraStreamer(manager, camera.id)
             Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
@@ -247,7 +247,7 @@ class WebcamService : Service() {
     ) {
         if (stopping) return
         val next = WebcamSettings.pickCamera(cameras, settings.cameraId) ?: return
-        val nextFormats = webcamFormats(next, settings.maxResolution.height)
+        val nextFormats = webcamFormats(next, settings.maxResolution.height, settings.fps60)
         val reenumerate = synchronized(lock) {
             val reenumerate = nextFormats != formats
             if (next.id != camera.id || reenumerate) {

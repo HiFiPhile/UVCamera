@@ -63,7 +63,7 @@ class WebcamSettings(context: Context) {
         return l
     }
 
-    /** Listen for camera or resolution cap changes. */
+    /** Listen for camera, resolution cap or frame rate changes. */
     fun onSourceChanged(listener: () -> Unit): SharedPreferences.OnSharedPreferenceChangeListener {
         val l = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key in SOURCE_KEYS) listener()
@@ -74,6 +74,11 @@ class WebcamSettings(context: Context) {
 
     fun removeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) =
         prefs.unregisterOnSharedPreferenceChangeListener(listener)
+
+    /** Offer 60 fps where the camera can. */
+    var fps60: Boolean
+        get() = prefs.getBoolean(KEY_FPS60, false)
+        set(value) = prefs.edit { putBoolean(KEY_FPS60, value) }
 
     var maxResolution: MaxResolution
         get() = prefs.getString(KEY_MAX_RESOLUTION, null)
@@ -88,8 +93,9 @@ class WebcamSettings(context: Context) {
         private const val KEY_ROTATION = "rotation"
         private const val KEY_MIRROR_H = "mirror_h"
         private const val KEY_MIRROR_V = "mirror_v"
+        private const val KEY_FPS60 = "fps60"
         private val TRANSFORM_KEYS = setOf(KEY_ROTATION, KEY_MIRROR_H, KEY_MIRROR_V)
-        private val SOURCE_KEYS = setOf(KEY_CAMERA_ID, KEY_MAX_RESOLUTION)
+        private val SOURCE_KEYS = setOf(KEY_CAMERA_ID, KEY_MAX_RESOLUTION, KEY_FPS60)
 
         /**
          * Clockwise rotation that makes [camera]'s frames upright with the

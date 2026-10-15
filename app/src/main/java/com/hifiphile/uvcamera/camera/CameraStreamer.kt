@@ -590,7 +590,8 @@ private class WorkerBuffers(width: Int, height: Int, mode: EncodeMode) {
  *
  * Hardware JPEG frames are just copied, on the camera thread. YUV frames are
  * copied out of the image on the camera thread (so the camera can reuse it)
- * and transformed/compressed on [WORKERS] threads: software JPEG at 1080p
+ * and transformed/compressed on [WORKERS] threads (twice that above 30 fps):
+ * software JPEG at 1080p
  * takes longer than a frame interval on one core. Frames that finish out of
  * order are dropped so the host never goes backwards.
  */
@@ -611,16 +612,18 @@ private class FrameEncoder(
     @Volatile
     private var xform = makeTransform(transform)
 
+    /** Enough workers for the frame rate: software JPEG at 1080p takes ~38 ms. */
+    private val workerCount = if (params.fps > 31) WORKERS * 2 else WORKERS
     private val workers = if (mode == EncodeMode.HW_JPEG) {
         null
     } else {
-        Executors.newFixedThreadPool(WORKERS) { r -> Thread(r, "frame-encoder") }
+        Executors.newFixedThreadPool(workerCount) { r -> Thread(r, "frame-encoder") }
     }
     private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
 
     /** Free plane sets; one more than the workers so the camera never waits. */
     private val freeSets = ArrayDeque<PlaneSet>().apply {
-        repeat(WORKERS + 1) { add(PlaneSet()) }
+        repeat(workerCount + 1) { add(PlaneSet()) }
     }
 
     private var nextSeq = 0L
