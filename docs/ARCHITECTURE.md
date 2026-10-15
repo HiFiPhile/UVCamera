@@ -109,10 +109,12 @@ A single static binary per ABI with subcommands:
 Process model (from MSD): `service.sh` → `app_process` runs
 `standalone.AuthSupervisor` as root. The supervisor spawns
 `runcon u:r:uvcamera_daemon:s0 uvcd daemon` with its stdin/stdout as a private
-auth pipe. The daemon drops to `system:system`, keeping only `CAP_CHOWN`
-(configfs creates new nodes as `root:root`, so it must `chown` them),
-`CAP_SYS_NICE` (USB IRQ thread priority) and the `readproc` group (to see
-kernel threads through `/proc`'s `hidepid`). It listens on `@uvcamerad` and
+auth pipe. The daemon opens the experimental kernel module, if there is
+one for the running kernel, then drops to `system:system`, keeping only
+`CAP_CHOWN` (configfs creates new nodes as `root:root`, so it must `chown`
+them), `CAP_SYS_NICE` (USB IRQ thread priority), `CAP_SYS_MODULE` (loading
+that module when the app opts in) and the `readproc` group (to see kernel
+threads through `/proc`'s `hidepid`). It listens on `@uvcamerad` and
 asks the supervisor to authorize every peer UID: at connect, and again on
 every control request.
 
@@ -136,6 +138,9 @@ arrives and a buffer is free. If none arrives within 1.5 frame intervals,
 the last one is repeated (for up to 1 s), then the test pattern is sent as a
 "camera not ready" placeholder. YUYV frames must be exactly w×h×2 bytes and
 MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
+H.264 frames (experimental kernel module only) depend on each other: they
+queue in order and are never repeated; on overflow the queue is dropped up
+to the next IDR, which the app is asked for.
 
 ### App (Kotlin + Compose, `app/`)
 
@@ -237,7 +242,7 @@ selected camera's streamable sizes (≥ 30 fps), clipped to bandwidth:
 |---|---|---|
 | MJPEG | 1920×1080, 1280×720, 640×480 @ 30/15 fps | 1080p30 ≈ 3–9 MB/s, fine |
 | YUYV | 640×480 @ 30, 1280×720 @ 10 | 640×480×2×30 = 18.4 MB/s, at the limit |
-| H.264 (frame-based) | as MJPEG | ≪ 1 MB/s; Phase 5 |
+| H.264 (frame-based) | as MJPEG, only with the experimental kernel module | ≈ 1.5 MB/s |
 
 `streaming_maxpacket=3072` (HS high-bandwidth, 3×1024) and, on SuperSpeed
 UDCs, `streaming_maxburst` raise isochronous throughput. On pre-6.13 kernels,
@@ -251,19 +256,21 @@ only newer kernels have.
 
 ## IPC protocol
 
-Abstract Unix stream socket `@uvcamerad`, protocol version 4 (`message.rs`,
+Abstract Unix stream socket `@uvcamerad`, protocol version 5 (`message.rs`,
 mirrored by `Message.kt`, with golden-byte tests on both sides). After a
 version handshake, a connection carries tagged little-endian messages in
 MSD's style. Malformed input closes the connection.
 
 - **Control connection:** request/response. `GetStatus` → `Status` (enabled,
   host link speed, current stream, fps sent, fps received from the app,
-  failed frames), `Enable(maxburst, formats, controls)`, `Disable`. The
+  failed frames, kernel module state), `Enable(maxburst, formats,
+  controls, kernel_module)`, `Disable`. The
   control capabilities (zoom range, focus, white balance, power line) set
   the units' `bmControls`; brightness is always offered.
 - **Source connection:** a second connection sends `AttachSource` and then
   carries frames. The daemon sends `StreamStart(stream_id, params)`,
-  `StreamStop(stream_id)` and `Control(id, value)`; on attach it replays
+  `StreamStop(stream_id)`, `Control(id, value)` and `KeyFrame(stream_id)`
+  (H.264: send an IDR next); on attach it replays
   the current control values and stream. The app sends `Frame(stream_id, pts_us, bytes)`,
   where `pts_us` is the sensor capture time in CLOCK_MONOTONIC (for latency
   stats). Frames for an old `stream_id` are dropped, so a format switch
@@ -343,6 +350,15 @@ configfs.
    to every app on the device, and it moves protocol code into the app.
 3. **Install the app as a priv-app** like MSD. Rejected: no privileged
    permission is needed, and KernelSU module mounting adds setup steps.
+4. **Android USB accessory mode (AOA), without root.** Rejected: the
+   accessory function's descriptors are fixed and vendor-specific, so hosts
+   never load their UVC driver. It would need host software and a virtual
+   camera on every OS.
+5. **Our own UVC function module with bulk transfers and H.264**
+   (`kmod/`). Built and working, but kept as an opt-in experiment: hosts
+   support H.264 poorly (Windows Camera ignores it, OBS adds latency), and
+   MJPEG 1080p30 already fits isochronous transfers. See PLAN.md,
+   "Experiment: kernel module with bulk + H.264".
 
 ## Repository layout
 
@@ -351,6 +367,7 @@ Cargo.toml              Rust workspace
 uvcd/                   privileged daemon/CLI (Rust)
 app/                    Android app (Kotlin, Compose)
 app/module/             Magisk/KernelSU module scripts
+kmod/                   experimental usb_f_uvcx kernel module (bulk, H.264)
 docs/ARCHITECTURE.md    this file
 docs/PLAN.md            phased plan and test strategy
 ```

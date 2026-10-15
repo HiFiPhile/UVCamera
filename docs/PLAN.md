@@ -313,16 +313,71 @@ Planned:
 
 ## Phase 5: stretch
 
-- H.264 via UVC 1.5 frame-based format: camera → OpenGL (rotation/mirror)
-  → MediaCodec hardware encoder, zero-copy. **Blocked on the OnePlus 15:**
-  the configfs `streaming/framebased` format landed in Linux 6.13 and
-  this phone runs GKI 6.12 (its UVC function offers only `mjpeg` and
-  `uncompressed`, bcdUVC 0x0110; the vendor init's `streaming/h264/h`
-  link points at nothing). Expected on phones with the next GKI branch
-  (6.18). `uvcd doctor` reports it ("uvc frame-based format
-  (H.264)"), so the app can offer H.264 only where the kernel supports it.
 - Microphone as UAC2 (`f_uac2`) so the phone is a webcam + mic.
 - Still image capture (method 2).
+
+### Experiment: kernel module with bulk + H.264 (2026-10-15) — not worth it
+
+Goal: better image quality and faster transfers with H.264 over bulk, which
+the phone's 6.12 UVC function can't do (frame-based formats arrived in 6.13;
+bulk streaming isn't upstream at all). Ideally without root.
+
+**Without root: not possible.** Android's USB accessory mode (AOA) can't
+present a UVC device. The kernel's accessory function has fixed
+vendor-specific descriptors (VID 18D1, class 0xFF, two bulk endpoints), and
+the host must start accessory mode with vendor requests. The host would need
+our own driver or software plus a virtual camera on every OS. The stock
+DeviceAsWebcam is installed on the OnePlus 15 but hidden
+(`ro.usb.uvc.enabled` unset, only Qualcomm `diag,uvc` compositions).
+
+**What was built** (commits ba95d07..0365b65):
+
+- `kmod/usb_f_uvcx.ko`: upstream's UVC gadget (v7.3-rc7) as a loadable
+  function named `uvcx`, beside the built-in `uvc`. Built against the GKI
+  tree (`kernel/common` 925a103d123c, clang r536225, the GKI build's
+  `vmlinux.symvers`); compat shims for 6.12; loads on KMI
+  `android16-6.12-6` (unsigned modules are allowed; all needed symbols are
+  exported except `v4l2_fraction_to_interval`, copied).
+- Bulk streaming, after Jing Leng's unmerged 2022 series reworked for the
+  current code: endpoint in alt 0, enabled for the whole configuration;
+  start on the COMMIT data stage. dwc3 handles CLEAR_FEATURE(HALT), the
+  hosts' stop signal, without telling the function (only in-flight requests
+  see -EPIPE). So the module also stops after 2 s without host reads, and
+  restarts on a COMMIT during a stream; stopping dequeues queued requests.
+  Bulk needs vmalloc buffers (the first version oopsed on sg buffers with
+  no kernel mapping). Re-enabling an endpoint right after disabling fails on
+  dwc3 ("No resource").
+- H.264 frame-based format; daemon protocol v5 (H.264 kind, kernel module
+  option, module state, KeyFrame request). The daemon opens
+  `usb_f_uvcx.<KMI>.ko` as root and loads it with `finit_module` when the
+  app opts in; H.264 frames queue in order, never repeated. The app encodes
+  with the hardware AVC encoder fed by a GL shader (rotation/mirror/crop):
+  High profile, no B-frames, VUI with no reordering, IDR every second.
+
+**Results** (Windows 11 and Linux, High and SuperSpeed):
+
+| | Result |
+|---|---|
+| Bulk MJPEG/YUYV, test pattern and camera | ✅ 30 fps, no failed frames; YUYV frames span payloads fine |
+| Start/stop, camera switch, replug, resolution change | ✅ after the idle timeout and restart-on-commit |
+| H.264 1080p30 on the phone | ✅ GPU path: 30 fps, ~100 ms capture → USB, same as MJPEG. The CPU transform (32 ms/frame rotated) dropped frames |
+| Windows Camera | Uses MJPEG only, never picks H.264 |
+| OBS | H.264 works but with high latency, even with buffering disabled (frame-threaded decoding) |
+| ffplay | Needs `-fflags nobuffer -flags low_delay`; then < 250 ms with occasional spikes |
+
+**Conclusion:** not worth it, because hosts support H.264 poorly. Common
+apps either ignore H.264 or decode it with more latency than MJPEG, and
+MJPEG 1080p30 already fits isochronous transfers on the built-in function.
+Bulk alone mainly helps uncompressed video: USB 3 bulk could carry about
+1080p60 YUYV (estimated, not measured), while 4K60 webcams use MJPEG or
+H.264/H.265 in any case. Costs: one module build per GKI KMI (the GKI tree
+isn't in CI), and a module bug can crash the phone.
+
+The code stays as an opt-in experiment: release builds don't include the
+module (CI can't build it), and the app only shows the H.264 chip when the
+daemon has a module for the running kernel. Revisit if hosts get
+low-latency H.264 UVC decoding, uncompressed 1080p60 becomes a goal, or a
+future GKI's built-in function has frame-based formats.
 
 ## Test strategy
 

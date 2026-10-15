@@ -1,5 +1,9 @@
 # usb_f_uvcx
 
+**Experimental, not part of releases.** It works, but H.264 over UVC isn't
+worth it with today's hosts; see docs/PLAN.md, "Experiment: kernel module
+with bulk + H.264".
+
 The Linux UVC gadget function (`drivers/usb/gadget/function/*uvc*`) from
 upstream, built as an out-of-tree module that registers itself as `uvcx`.
 It sits next to a kernel's built-in `uvc` function and brings what older
