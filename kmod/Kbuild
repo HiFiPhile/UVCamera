@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
+
+# The upstream UVC gadget function with frame-based formats and bulk
+# streaming, registered as "uvcx" so it can sit next to a kernel's
+# built-in "uvc" function.
+obj-m				+= usb_f_uvcx.o
+usb_f_uvcx-y			:= f_uvc.o uvc_queue.o uvc_v4l2.o uvc_video.o uvc_configfs.o uvc_trace.o
+CFLAGS_uvc_trace.o		:= -I$(src)
+ccflags-y			+= -include $(src)/compat.h
