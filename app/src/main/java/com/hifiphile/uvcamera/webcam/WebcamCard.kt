@@ -157,8 +157,6 @@ fun WebcamStatusCard(viewModel: WebcamViewModel = viewModel()) {
 /** Camera, resolution and orientation, all applied live. */
 @Composable
 fun WebcamSettingsCard() {
-    val service by WebcamService.state.collectAsStateWithLifecycle()
-
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -168,7 +166,7 @@ fun WebcamSettingsCard() {
                 stringResource(R.string.webcam_settings_title),
                 style = MaterialTheme.typography.titleMedium,
             )
-            WebcamSettingsRows(running = service.running)
+            WebcamSettingsRows()
         }
     }
 }
@@ -186,7 +184,7 @@ private fun facingLabel(facing: Facing) = stringResource(when (facing) {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun WebcamSettingsRows(running: Boolean) {
+private fun WebcamSettingsRows() {
     val context = LocalContext.current
     val settings = remember { WebcamSettings(context) }
     val cameras = remember {
@@ -237,14 +235,6 @@ private fun WebcamSettingsRows(running: Boolean) {
         }
     }
 
-    if (running) {
-        Text(
-            stringResource(R.string.webcam_settings_reconnect),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-
     Text(
         stringResource(R.string.webcam_settings_orientation),
         style = MaterialTheme.typography.labelLarge,
@@ -281,7 +271,7 @@ private fun WebcamSettingsRows(running: Boolean) {
         )
     }
     Text(
-        stringResource(R.string.webcam_settings_orientation_hint),
+        stringResource(R.string.webcam_settings_orientation_note),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
