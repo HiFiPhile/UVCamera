@@ -756,7 +756,8 @@ uvcg_video_disable(struct uvc_video *video)
 		return -ENODEV;
 	}
 
-	if (video->max_payload_size && video->is_enabled)
+	/* After a disconnect the endpoint is disabled and holds nothing. */
+	if (video->max_payload_size && video->is_enabled && video->ep->enabled)
 		uvcg_video_bulk_flush(video);
 
 	INIT_LIST_HEAD(&inflight_bufs);

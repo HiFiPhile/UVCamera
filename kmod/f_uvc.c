@@ -272,6 +272,8 @@ static void uvc_function_bulk_commit(struct uvc_device *uvc)
 	unsigned long flags;
 
 	spin_lock_irqsave(&uvc->bulk_lock, flags);
+	uvcg_info(&uvc->func, "bulk: commit, %s\n",
+		  uvc->bulk_active ? "restarting" : "starting");
 	if (uvc->bulk_active) {
 		uvc->bulk_restart = true;
 		uvc_function_bulk_request_streamoff(uvc);

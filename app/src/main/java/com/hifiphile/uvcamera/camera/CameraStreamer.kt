@@ -6,6 +6,7 @@ package com.hifiphile.uvcamera.camera
 import android.annotation.SuppressLint
 import android.graphics.ImageFormat
 import android.graphics.Rect
+import android.graphics.SurfaceTexture
 import android.graphics.YuvImage
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -28,6 +29,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.util.Range
 import android.util.Size
+import android.view.Surface
 import com.hifiphile.uvcamera.daemon.ControlIds
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.StreamParams
@@ -51,7 +53,10 @@ enum class EncodeMode {
     /** YUV from the camera, transformed and repacked to YUYV. */
     YUYV,
 
-    /** YUV from the camera, transformed, compressed by the hardware H.264 encoder. */
+    /**
+     * The camera renders into a texture, the GPU transforms it into the
+     * hardware H.264 encoder's input surface: no CPU work per frame.
+     */
     H264,
 }
 
@@ -106,10 +111,14 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 FormatKind.H264 -> EncodeMode.H264
                 FormatKind.MJPEG -> EncodeMode.YUV_JPEG
             }
-            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
-                .filter { fastEnough(ImageFormat.YUV_420_888, it) }
-                .map { it.width to it.height }
-            val (w, h) = chooseCaptureSize(yuvSizes, params.width, params.height, transform)
+            val sizes = if (mode == EncodeMode.H264) {
+                map.getOutputSizes(SurfaceTexture::class.java).orEmpty()
+                    .filter { map.getOutputMinFrameDuration(SurfaceTexture::class.java, it) in 1..maxDuration }
+            } else {
+                map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
+                    .filter { fastEnough(ImageFormat.YUV_420_888, it) }
+            }.map { it.width to it.height }
+            val (w, h) = chooseCaptureSize(sizes, params.width, params.height, transform)
                 ?: throw IllegalArgumentException(
                     "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
                         "with this camera")
@@ -210,6 +219,13 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
     private var encoder: FrameEncoder? = null
+
+    /** H.264: the GPU transform and the encoder it draws into. */
+    private var gl: GlTransform? = null
+    private var avc: AvcEncoder? = null
+
+    /** What the camera renders into: the reader's or [gl]'s surface. */
+    private var output: Surface? = null
     private var active: Active? = null
 
     /** A stream the camera couldn't start; retried when the transform changes. */
@@ -396,6 +412,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 Log.i(TAG, "Applying $transform live")
                 current.transform = transform
                 encoder?.setTransform(transform)
+                gl?.setTransform(transform)
             } else {
                 Log.i(TAG, "Restarting camera for $transform ($newPlan)")
                 closeCamera()
@@ -413,7 +430,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
 
     /** H.264: make the next frame an IDR frame. */
     fun requestKeyFrame() {
-        handler.post { encoder?.requestKeyFrame() }
+        handler.post { avc?.requestKeyFrame() }
     }
 
     /** Stop and release the handler thread. */
@@ -457,25 +474,38 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         val fps = Math.round(params.fps).toInt()
         Log.i(TAG, "Starting camera $cameraId: $params with $transform via $plan")
 
-        val format = if (plan.mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
-        val reader = ImageReader.newInstance(plan.width, plan.height, format, MAX_IMAGES)
         val realtimeTimestamps = chars.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
-        val encoder = FrameEncoder(plan, params, transform, realtimeTimestamps, sink)
-        reader.setOnImageAvailableListener(encoder, handler)
-        this.encoder = encoder
-        this.reader = reader
+        val output = if (plan.mode == EncodeMode.H264) {
+            val avc = AvcEncoder(params.width, params.height, fps) { data, ptsUs, keyFrame ->
+                sink.onFrame(data, data.size, ptsUs, keyFrame)
+            }
+            this.avc = avc
+            val gl = GlTransform(plan.width, plan.height, params.width, params.height, transform,
+                avc.inputSurface, realtimeTimestamps)
+            this.gl = gl
+            gl.cameraSurface
+        } else {
+            val format = if (plan.mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
+            val reader = ImageReader.newInstance(plan.width, plan.height, format, MAX_IMAGES)
+            val encoder = FrameEncoder(plan, params, transform, realtimeTimestamps, sink)
+            reader.setOnImageAvailableListener(encoder, handler)
+            this.encoder = encoder
+            this.reader = reader
+            reader.surface
+        }
+        this.output = output
         active = Active(params, transform, plan, sink, onError)
 
         manager.openCamera(cameraId, executor, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
-                if (this@CameraStreamer.reader !== reader) {
+                if (this@CameraStreamer.output !== output) {
                     // Stopped or restarted while opening.
                     camera.close()
                     return
                 }
                 device = camera
-                createSession(camera, reader, chars, plan.mode, fps, onError)
+                createSession(camera, output, chars, plan.mode, fps, onError)
             }
 
             override fun onDisconnected(camera: CameraDevice) {
@@ -500,13 +530,13 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
 
     private fun createSession(
         camera: CameraDevice,
-        reader: ImageReader,
+        output: Surface,
         chars: CameraCharacteristics,
         mode: EncodeMode,
         fps: Int,
         onError: (String) -> Unit,
     ) {
-        val outputs = listOf(OutputConfiguration(reader.surface))
+        val outputs = listOf(OutputConfiguration(output))
         val config = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR,
             outputs,
@@ -522,7 +552,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                     // PREVIEW rather than RECORD: it is tuned for latency, and
                     // video stabilization would buffer several frames.
                     val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                        addTarget(reader.surface)
+                        addTarget(output)
                         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                         set(
                             CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
@@ -574,6 +604,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         reader = null
         encoder?.close()
         encoder = null
+        gl?.close()
+        gl = null
+        avc?.close()
+        avc = null
+        output = null
         if (active != null) {
             Log.i(TAG, "Camera $cameraId closed")
         }
@@ -608,8 +643,7 @@ private class WorkerBuffers(width: Int, height: Int, mode: EncodeMode) {
  * copied out of the image on the camera thread (so the camera can reuse it)
  * and transformed/compressed on [WORKERS] threads: software JPEG at 1080p
  * takes longer than a frame interval on one core. Frames that finish out of
- * order are dropped so the host never goes backwards. For H.264, one worker
- * transforms frames into the hardware encoder's input, in order.
+ * order are dropped so the host never goes backwards.
  */
 private class FrameEncoder(
     private val plan: CapturePlan,
@@ -628,27 +662,16 @@ private class FrameEncoder(
     @Volatile
     private var xform = makeTransform(transform)
 
-    private val workerCount = if (mode == EncodeMode.H264) 1 else WORKERS
     private val workers = if (mode == EncodeMode.HW_JPEG) {
         null
     } else {
-        Executors.newFixedThreadPool(workerCount) { r -> Thread(r, "frame-encoder") }
+        Executors.newFixedThreadPool(WORKERS) { r -> Thread(r, "frame-encoder") }
     }
     private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
 
     /** Free plane sets; one more than the workers so the camera never waits. */
     private val freeSets = ArrayDeque<PlaneSet>().apply {
-        repeat(workerCount + 1) { add(PlaneSet()) }
-    }
-
-    private val avc = if (mode == EncodeMode.H264) {
-        AvcEncoder(width, height, Math.round(params.fps).toInt()) { data, ptsUs, keyFrame ->
-            if (!closed) {
-                sink.onFrame(data, data.size, ptsUs, keyFrame)
-            }
-        }
-    } else {
-        null
+        repeat(WORKERS + 1) { add(PlaneSet()) }
     }
 
     private var nextSeq = 0L
@@ -675,9 +698,6 @@ private class FrameEncoder(
         xform = makeTransform(transform)
     }
 
-    fun requestKeyFrame() {
-        avc?.requestKeyFrame()
-    }
 
     override fun onImageAvailable(reader: ImageReader) {
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
@@ -728,13 +748,7 @@ private class FrameEncoder(
     private fun encode(set: PlaneSet, xf: YuvTransform, seq: Long, ptsUs: Long) {
         val start = System.nanoTime()
         try {
-            if (avc != null) {
-                if (!closed && avc.encode(ptsUs) { image -> xf.toImage(set.y!!, set.u!!, set.v!!, image) }) {
-                    recordStats(System.nanoTime() - start)
-                } else {
-                    synchronized(statsLock) { statsBusy++ }
-                }
-            } else if (mode == EncodeMode.YUYV) {
+            if (mode == EncodeMode.YUYV) {
                 val out = ByteArray(width * height * 2)
                 xf.toYuyv(set.y!!, set.u!!, set.v!!, out)
                 deliver(seq, out, out.size, ptsUs, System.nanoTime() - start)
@@ -773,11 +787,6 @@ private class FrameEncoder(
     override fun close() {
         closed = true
         workers?.shutdown()
-        if (avc != null) {
-            // Let a frame being transformed finish before the codec goes away.
-            workers?.awaitTermination(CLOSE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-            avc.close()
-        }
     }
 
     private fun recordStats(elapsedNs: Long) = synchronized(statsLock) {
@@ -812,7 +821,6 @@ private class FrameEncoder(
 
         /** Software JPEG at 1080p takes ~38 ms on the OnePlus 15; two fit 30 fps. */
         private const val WORKERS = 2
-        private const val CLOSE_TIMEOUT_MS = 500L
     }
 }
 

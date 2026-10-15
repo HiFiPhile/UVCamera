@@ -3,7 +3,6 @@
 
 package com.hifiphile.uvcamera.camera
 
-import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -11,8 +10,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.view.Surface
 import java.io.Closeable
-import java.util.ArrayDeque
 
 /** Receives encoded H.264 access units (Annex B), in decoding order. */
 fun interface AvcSink {
@@ -20,15 +19,16 @@ fun interface AvcSink {
 }
 
 /**
- * H.264 encoding of one stream with the platform's (hardware) encoder: YUV
- * frames in, Annex B access units out. Tuned for a live webcam: no B-frames
+ * H.264 encoding of one stream with the platform's (hardware) encoder:
+ * frames drawn into [inputSurface] in, Annex B access units out, with the
+ * surface frames' presentation times. Tuned for a live webcam: no B-frames
  * (frames go out in capture order), low latency, an IDR frame every second
  * and on request, each preceded by its SPS and PPS so a host can start
  * decoding at any IDR.
  */
 class AvcEncoder(
-    private val width: Int,
-    private val height: Int,
+    width: Int,
+    height: Int,
     fps: Int,
     private val sink: AvcSink,
 ) : Closeable {
@@ -62,8 +62,8 @@ class AvcEncoder(
     private val thread = HandlerThread("avc-encoder").apply { start() }
     private val codec = MediaCodec.createEncoderByType(MIME)
 
-    /** Input buffers the codec handed us, to fill from [encode]. */
-    private val freeInputs = ArrayDeque<Int>()
+    /** Where frames to encode are drawn. */
+    val inputSurface: Surface
 
     /** SPS and PPS, for encoders that don't repeat them before IDR frames. */
     @Volatile
@@ -75,7 +75,7 @@ class AvcEncoder(
     init {
         val format = MediaFormat.createVideoFormat(MIME, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT,
-                MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate(width, height, fps))
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
@@ -97,13 +97,14 @@ class AvcEncoder(
         }
         codec.setCallback(Callback(), Handler(thread.looper))
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        inputSurface = codec.createInputSurface()
         codec.start()
         Log.i(TAG, "Started ${codec.name}: $format")
     }
 
     private inner class Callback : MediaCodec.Callback() {
         override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-            synchronized(freeInputs) { freeInputs.addLast(index) }
+            // Input comes through the surface.
         }
 
         override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
@@ -123,6 +124,7 @@ class AvcEncoder(
 
             if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                 codecConfig = data
+                Log.i(TAG, "Codec config: " + data.joinToString("") { "%02x".format(it) })
                 return
             }
             val keyFrame = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
@@ -144,26 +146,6 @@ class AvcEncoder(
         }
     }
 
-    /**
-     * Encode one frame, written into the codec's input by [fill] (which gets
-     * the input image, [width]x[height]). Returns false, dropping the frame,
-     * if the encoder has no free input.
-     */
-    fun encode(ptsUs: Long, fill: (Image) -> Unit): Boolean {
-        val index = synchronized(freeInputs) { freeInputs.pollFirst() } ?: return false
-        if (closed) {
-            return false
-        }
-        val image = codec.getInputImage(index)
-        if (image == null) {
-            Log.w(TAG, "No input image")
-            return false
-        }
-        fill(image)
-        codec.queueInputBuffer(index, 0, width * height * 3 / 2, ptsUs, 0)
-        return true
-    }
-
     /** Make the next frame an IDR frame. */
     fun requestKeyFrame() {
         if (closed) {
@@ -176,6 +158,7 @@ class AvcEncoder(
         closed = true
         runCatching { codec.stop() }
         codec.release()
+        inputSurface.release()
         thread.quitSafely()
     }
 }
