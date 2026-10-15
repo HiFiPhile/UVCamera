@@ -144,7 +144,11 @@ int uvcg_queue_init(struct uvc_video_queue *queue, struct device *dev, enum v4l2
 	queue->queue.buf_struct_size = sizeof(struct uvc_buffer);
 	queue->queue.ops = &uvc_queue_qops;
 	queue->queue.lock = lock;
-	if (cdev->gadget->sg_supported) {
+	/*
+	 * The bulk encoder copies from the buffer's kernel mapping, which only
+	 * vmalloc buffers have. max_payload_size is set before this is called.
+	 */
+	if (cdev->gadget->sg_supported && !video->max_payload_size) {
 		queue->queue.mem_ops = &vb2_dma_sg_memops;
 		queue->use_sg = 1;
 	} else {

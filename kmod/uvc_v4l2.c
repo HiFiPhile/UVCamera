@@ -557,11 +557,13 @@ uvc_v4l2_streamoff(struct file *file, void *fh, enum v4l2_buf_type type)
 	if (ret < 0)
 		return ret;
 
-	if (uvc->state != UVC_STATE_STREAMING)
-		return 0;
+	if (uvc->state == UVC_STATE_STREAMING) {
+		uvc->state = UVC_STATE_CONNECTED;
+		uvc_function_setup_continue(uvc, 1);
+	}
 
-	uvc->state = UVC_STATE_CONNECTED;
-	uvc_function_setup_continue(uvc, 1);
+	if (uvc->bulk)
+		uvc_function_bulk_stopped(uvc);
 	return 0;
 }
 

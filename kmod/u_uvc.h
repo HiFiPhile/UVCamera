@@ -19,11 +19,19 @@
 
 #define fi_to_f_uvc_opts(f)	container_of(f, struct f_uvc_opts, func_inst)
 
+/* Bulk streaming: largest payload, and largest request a payload is split into */
+#define UVCG_BULK_MAX_PAYLOAD_SIZE		(16U * 1024 * 1024)
+#define UVCG_BULK_MAX_REQ_SIZE			(64U * 1024)
+#define UVCG_BULK_MAX_REQS			64U
+/* A bulk stream the host hasn't read from for this long has stopped. */
+#define UVCG_BULK_IDLE_TIMEOUT_MS		2000
+
 struct f_uvc_opts {
 	struct usb_function_instance			func_inst;
 	unsigned int					streaming_interval;
 	unsigned int					streaming_maxpacket;
 	unsigned int					streaming_maxburst;
+	unsigned int					streaming_transfer;
 
 	unsigned int					control_interface;
 	unsigned int					streaming_interface;

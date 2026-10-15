@@ -87,6 +87,7 @@ struct uvc_request {
 	u8 header[UVCG_REQUEST_HEADER_LEN];
 	struct uvc_buffer *last_buf;
 	struct list_head list;
+	bool queued;	/* on the endpoint; protected by video->req_lock */
 };
 
 struct uvc_video {
@@ -116,6 +117,7 @@ struct uvc_video {
 
 	/* Requests */
 	bool is_enabled; /* tracks whether video stream is enabled */
+	bool bulk_flushing; /* bulk: being stopped, don't queue requests */
 	unsigned int req_size;
 	unsigned int max_req_size;
 	struct list_head ureqs; /* all uvc_requests allocated by uvc_video */
@@ -184,6 +186,16 @@ struct uvc_device {
 	/* Events */
 	unsigned int event_length;
 	unsigned int event_setup_out : 1;
+
+	/* Bulk streaming, see f_uvc.c */
+	bool bulk;
+	spinlock_t bulk_lock;		/* protects the flags below */
+	bool bulk_commit;		/* SET_CUR(COMMIT) data stage pending */
+	bool bulk_active;		/* endpoint enabled, STREAMON sent */
+	bool bulk_stopping;		/* STREAMOFF sent */
+	bool bulk_restart;		/* start again once stopped */
+	struct work_struct bulk_stop_work;
+	struct delayed_work bulk_idle_work;
 };
 
 static inline struct uvc_device *to_uvc(struct usb_function *f)
@@ -210,6 +222,9 @@ static inline struct uvc_file_handle *file_to_uvc_file_handle(struct file *filp)
  */
 
 extern void uvc_function_setup_continue(struct uvc_device *uvc, int disable_ep);
+extern void uvc_function_bulk_stop(struct uvc_device *uvc);
+extern void uvc_function_bulk_stopped(struct uvc_device *uvc);
+extern void uvc_function_bulk_alive(struct uvc_device *uvc);
 extern void uvc_function_connect(struct uvc_device *uvc);
 extern void uvc_function_disconnect(struct uvc_device *uvc);
 

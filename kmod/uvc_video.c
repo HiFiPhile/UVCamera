@@ -16,6 +16,7 @@
 
 #include <media/v4l2-dev.h>
 
+#include "u_uvc.h"
 #include "uvc.h"
 #include "uvc_queue.h"
 #include "uvc_video.h"
@@ -96,9 +97,13 @@ uvc_video_encode_bulk(struct usb_request *req, struct uvc_video *video,
 	int len = video->req_size;
 	int ret;
 
-	/* Add a header at the beginning of the payload. */
+	/*
+	 * Add a header at the beginning of the payload. The payload can span
+	 * several requests: mark the end of frame if it fits in the payload.
+	 */
 	if (video->payload_size == 0) {
-		ret = uvc_video_encode_header(video, buf, mem, len);
+		ret = uvc_video_encode_header(video, buf, mem,
+					      video->max_payload_size);
 		video->payload_size += ret;
 		mem += ret;
 		len -= ret;
@@ -112,7 +117,13 @@ uvc_video_encode_bulk(struct usb_request *req, struct uvc_video *video,
 	len -= ret;
 
 	req->length = video->req_size - len;
-	req->zero = video->payload_size == video->max_payload_size;
+	/*
+	 * A payload ends with a short packet, or at max_payload_size. A frame
+	 * that ends on a packet boundary needs a zero-length packet, or the
+	 * host takes the next frame's header as more data.
+	 */
+	req->zero = buf->bytesused == video->queue.buf_used &&
+		    video->payload_size != video->max_payload_size;
 
 	if (buf->bytesused == video->queue.buf_used) {
 		video->queue.buf_used = 0;
@@ -258,6 +269,8 @@ static int uvcg_video_ep_queue(struct uvc_video *video, struct usb_request *req)
 	int ret;
 
 	ret = usb_ep_queue(video->ep, req, GFP_ATOMIC);
+	if (ret == 0)
+		((struct uvc_request *)req->context)->queued = true;
 	if (ret < 0) {
 		uvcg_err(&video->uvc->func, "Failed to queue request (%d).\n",
 			 ret);
@@ -284,7 +297,7 @@ static int uvcg_video_usb_req_queue(struct uvc_video *video,
 	bool is_bulk = video->max_payload_size;
 	struct list_head *list = NULL;
 
-	if (!video->is_enabled)
+	if (!video->is_enabled || video->bulk_flushing)
 		return -ENODEV;
 
 	if (queue_to_ep) {
@@ -338,6 +351,7 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 
 	spin_lock_irqsave(&video->req_lock, flags);
 	atomic_dec(&video->queued);
+	ureq->queued = false;
 	if (!video->is_enabled) {
 		/*
 		 * When is_enabled is false, uvcg_video_disable() ensures
@@ -356,7 +370,14 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 
 	switch (req->status) {
 	case 0:
+		if (video->max_payload_size)
+			uvc_function_bulk_alive(video->uvc);
 		break;
+
+	case -ECONNRESET:	/* dequeued while stopping a bulk stream */
+		if (video->bulk_flushing)
+			break;
+		fallthrough;
 
 	case -EXDEV:
 		uvcg_dbg(&video->uvc->func, "VS request missed xfer.\n");
@@ -368,6 +389,16 @@ uvc_video_complete(struct usb_ep *ep, struct usb_request *req)
 		uvcg_dbg(&video->uvc->func, "VS request cancelled.\n");
 		uvcg_queue_cancel(queue, 1);
 		break;
+
+	case -EPIPE:
+		if (video->max_payload_size) {
+			/* The host cleared the bulk endpoint's halt: it stopped. */
+			uvcg_dbg(&video->uvc->func, "VS bulk stream stopped by host.\n");
+			schedule_work(&video->uvc->bulk_stop_work);
+			uvcg_queue_cancel(queue, 0);
+			break;
+		}
+		fallthrough;
 
 	default:
 		uvcg_warn(&video->uvc->func,
@@ -508,7 +539,8 @@ uvc_video_prep_requests(struct uvc_video *video)
 	if (!usb_endpoint_xfer_isoc(video->ep->desc)) {
 		video->req_size = max_req_size;
 		video->reqs_per_frame = video->uvc_num_requests =
-			DIV_ROUND_UP(video->imagesize, max_req_size);
+			clamp(DIV_ROUND_UP(video->imagesize, max_req_size), 4U,
+			      UVCG_BULK_MAX_REQS);
 
 		return;
 	}
@@ -679,6 +711,34 @@ static void uvcg_video_pump(struct work_struct *work)
 }
 
 /*
+ * Take back the requests queued on a bulk endpoint, which stays enabled
+ * between streams: the next stream must not start with this one's data.
+ */
+static void uvcg_video_bulk_flush(struct uvc_video *video)
+{
+	struct usb_request *reqs[UVCG_BULK_MAX_REQS];
+	struct uvc_request *ureq;
+	unsigned long flags;
+	unsigned int n = 0, i;
+
+	spin_lock_irqsave(&video->req_lock, flags);
+	video->bulk_flushing = true;
+	list_for_each_entry(ureq, &video->ureqs, list) {
+		if (ureq->queued && n < ARRAY_SIZE(reqs))
+			reqs[n++] = ureq->req;
+	}
+	spin_unlock_irqrestore(&video->req_lock, flags);
+
+	/*
+	 * Nothing gets queued anymore. Requests completing meanwhile go back
+	 * to req_free, as the stream is still enabled.
+	 */
+	cancel_work_sync(&video->pump);
+	for (i = 0; i < n; i++)
+		usb_ep_dequeue(video->ep, reqs[i]);
+}
+
+/*
  * Disable the video stream
  */
 int
@@ -695,6 +755,9 @@ uvcg_video_disable(struct uvc_video *video)
 			  "Video disable failed, device is uninitialized.\n");
 		return -ENODEV;
 	}
+
+	if (video->max_payload_size && video->is_enabled)
+		uvcg_video_bulk_flush(video);
 
 	INIT_LIST_HEAD(&inflight_bufs);
 	spin_lock_irqsave(&video->req_lock, flags);
@@ -777,6 +840,7 @@ int uvcg_video_enable(struct uvc_video *video)
 	 * returns.
 	 */
 	video->is_enabled = true;
+	video->bulk_flushing = false;
 
 	if ((ret = uvcg_queue_enable(&video->queue, 1)) < 0)
 		return ret;

@@ -197,6 +197,178 @@ static const struct usb_descriptor_header * const uvc_ss_streaming[] = {
 	NULL,
 };
 
+/*
+ * With a bulk streaming endpoint the interface has only alternate setting 0,
+ * which carries the endpoint.
+ */
+static const struct usb_descriptor_header * const uvc_fs_bulk_streaming[] = {
+	(struct usb_descriptor_header *) &uvc_fs_streaming_ep,
+	NULL,
+};
+
+static const struct usb_descriptor_header * const uvc_hs_bulk_streaming[] = {
+	(struct usb_descriptor_header *) &uvc_hs_streaming_ep,
+	NULL,
+};
+
+static const struct usb_descriptor_header * const uvc_ss_bulk_streaming[] = {
+	(struct usb_descriptor_header *) &uvc_ss_streaming_ep,
+	(struct usb_descriptor_header *) &uvc_ss_streaming_comp,
+	NULL,
+};
+
+/* --------------------------------------------------------------------------
+ * Bulk streaming
+ *
+ * A bulk endpoint has no alternate setting to select, so it stays enabled
+ * while the configuration is, and the host starts a stream with
+ * SET_CUR(VS_COMMIT_CONTROL) and then reads the endpoint. Linux and Windows
+ * stop it with CLEAR_FEATURE(ENDPOINT_HALT) on the endpoint, which the UDC
+ * handles itself: it shows up here only as requests that were in flight
+ * completing with -EPIPE, which is rare when frames go out faster than they
+ * come. So a stream the host stops reading from for a while is stopped too,
+ * and a COMMIT while a stream is running restarts it.
+ */
+
+/* Must be called with uvc->bulk_lock held. */
+static void uvc_function_bulk_streamon(struct uvc_device *uvc)
+{
+	struct uvc_video *video = &uvc->video;
+	struct v4l2_event v4l2_event;
+
+	if (!video->ep->enabled) {
+		uvcg_err(&uvc->func, "bulk: endpoint not enabled\n");
+		return;
+	}
+
+	video->max_req_size = min_t(unsigned int, video->max_payload_size,
+				    UVCG_BULK_MAX_REQ_SIZE);
+	uvc->bulk_active = true;
+	mod_delayed_work(system_wq, &uvc->bulk_idle_work,
+			 msecs_to_jiffies(UVCG_BULK_IDLE_TIMEOUT_MS));
+
+	memset(&v4l2_event, 0, sizeof(v4l2_event));
+	v4l2_event.type = UVC_EVENT_STREAMON;
+	v4l2_event_queue(&uvc->vdev, &v4l2_event);
+}
+
+/* Must be called with uvc->bulk_lock held. */
+static void uvc_function_bulk_request_streamoff(struct uvc_device *uvc)
+{
+	struct v4l2_event v4l2_event;
+
+	if (!uvc->bulk_active || uvc->bulk_stopping)
+		return;
+
+	uvc->bulk_stopping = true;
+	memset(&v4l2_event, 0, sizeof(v4l2_event));
+	v4l2_event.type = UVC_EVENT_STREAMOFF;
+	v4l2_event_queue(&uvc->vdev, &v4l2_event);
+}
+
+/* The host committed stream parameters: start streaming, or restart. */
+static void uvc_function_bulk_commit(struct uvc_device *uvc)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&uvc->bulk_lock, flags);
+	if (uvc->bulk_active) {
+		uvc->bulk_restart = true;
+		uvc_function_bulk_request_streamoff(uvc);
+	} else {
+		uvc_function_bulk_streamon(uvc);
+	}
+	spin_unlock_irqrestore(&uvc->bulk_lock, flags);
+}
+
+/* The host stopped the stream. */
+void uvc_function_bulk_stop(struct uvc_device *uvc)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&uvc->bulk_lock, flags);
+	uvc->bulk_restart = false;
+	uvc_function_bulk_request_streamoff(uvc);
+	spin_unlock_irqrestore(&uvc->bulk_lock, flags);
+}
+
+static void uvc_function_bulk_stop_work(struct work_struct *work)
+{
+	uvc_function_bulk_stop(container_of(work, struct uvc_device,
+					    bulk_stop_work));
+}
+
+static void uvc_function_bulk_idle_work(struct work_struct *work)
+{
+	struct uvc_device *uvc = container_of(to_delayed_work(work),
+					      struct uvc_device, bulk_idle_work);
+
+	uvcg_info(&uvc->func, "bulk: host stopped reading, stopping stream\n");
+	uvc_function_bulk_stop(uvc);
+}
+
+/* The host read from the stream. */
+void uvc_function_bulk_alive(struct uvc_device *uvc)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&uvc->bulk_lock, flags);
+	if (uvc->bulk_active && !uvc->bulk_stopping)
+		mod_delayed_work(system_wq, &uvc->bulk_idle_work,
+				 msecs_to_jiffies(UVCG_BULK_IDLE_TIMEOUT_MS));
+	spin_unlock_irqrestore(&uvc->bulk_lock, flags);
+}
+
+/* Userspace has turned the stream off. */
+void uvc_function_bulk_stopped(struct uvc_device *uvc)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&uvc->bulk_lock, flags);
+	if (uvc->bulk_active) {
+		uvc->bulk_active = false;
+		uvc->bulk_stopping = false;
+		cancel_delayed_work(&uvc->bulk_idle_work);
+		if (uvc->bulk_restart) {
+			uvc->bulk_restart = false;
+			uvc_function_bulk_streamon(uvc);
+		}
+	}
+	spin_unlock_irqrestore(&uvc->bulk_lock, flags);
+}
+
+static void uvc_function_bulk_reset(struct uvc_device *uvc)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&uvc->bulk_lock, flags);
+	uvc->bulk_commit = false;
+	uvc->bulk_active = false;
+	uvc->bulk_stopping = false;
+	uvc->bulk_restart = false;
+	cancel_delayed_work(&uvc->bulk_idle_work);
+	spin_unlock_irqrestore(&uvc->bulk_lock, flags);
+}
+
+/* (Re)enable the endpoint for SET_CONFIGURATION or SET_INTERFACE(0). */
+static int uvc_function_bulk_set_alt0(struct uvc_device *uvc)
+{
+	struct usb_function *f = &uvc->func;
+	struct usb_ep *ep = uvc->video.ep;
+	int ret;
+
+	/* SET_INTERFACE resets the interface: that ends a running stream. */
+	uvc_function_bulk_stop(uvc);
+
+	if (ep->enabled)
+		return 0;
+
+	ret = config_ep_by_speed(f->config->cdev->gadget, f, ep);
+	if (ret)
+		return ret;
+	return usb_ep_enable(ep);
+}
+
 /* --------------------------------------------------------------------------
  * Control requests
  */
@@ -217,6 +389,13 @@ uvc_function_ep0_complete(struct usb_ep *ep, struct usb_request *req)
 			sizeof(uvc_event->data.data));
 		memcpy(&uvc_event->data.data, req->buf, uvc_event->data.length);
 		v4l2_event_queue(&uvc->vdev, &v4l2_event);
+
+		/* Queued after the data so userspace sees the commit first. */
+		if (uvc->bulk_commit) {
+			uvc->bulk_commit = false;
+			if (req->status == 0)
+				uvc_function_bulk_commit(uvc);
+		}
 	}
 }
 
@@ -244,6 +423,10 @@ uvc_function_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 	 */
 	uvc->event_setup_out = !(ctrl->bRequestType & USB_DIR_IN);
 	uvc->event_length = le16_to_cpu(ctrl->wLength);
+	uvc->bulk_commit = uvc->bulk && uvc->event_setup_out &&
+		interface == uvc->streaming_intf &&
+		ctrl->bRequest == UVC_SET_CUR &&
+		le16_to_cpu(ctrl->wValue) >> 8 == UVC_VS_COMMIT_CONTROL;
 
 	memset(&v4l2_event, 0, sizeof(v4l2_event));
 	v4l2_event.type = UVC_EVENT_SETUP;
@@ -267,6 +450,13 @@ void uvc_function_setup_continue(struct uvc_device *uvc, int disable_ep)
 {
 	struct usb_composite_dev *cdev = uvc->func.config->cdev;
 
+	/*
+	 * Bulk streams don't come from SET_INTERFACE: nothing is delayed, and
+	 * the endpoint stays enabled.
+	 */
+	if (uvc->bulk)
+		return;
+
 	if (disable_ep && uvc->video.ep)
 		usb_ep_disable(uvc->video.ep);
 
@@ -284,6 +474,8 @@ uvc_function_get_alt(struct usb_function *f, unsigned interface)
 		return 0;
 	else if (interface != uvc->streaming_intf)
 		return -EINVAL;
+	else if (uvc->bulk)
+		return 0;
 	else
 		return uvc->video.ep->enabled ? 1 : 0;
 }
@@ -330,10 +522,8 @@ uvc_function_set_alt(struct usb_function *f, unsigned interface, unsigned alt)
 	if (interface != uvc->streaming_intf)
 		return -EINVAL;
 
-	/* TODO
-	if (usb_endpoint_xfer_bulk(&uvc->desc.vs_ep))
-		return alt ? -EINVAL : 0;
-	*/
+	if (uvc->bulk)
+		return alt ? -EINVAL : uvc_function_bulk_set_alt0(uvc);
 
 	switch (alt) {
 	case 0:
@@ -389,6 +579,7 @@ uvc_function_disable(struct usb_function *f)
 	v4l2_event_queue(&uvc->vdev, &v4l2_event);
 
 	uvc->state = UVC_STATE_DISCONNECTED;
+	uvc_function_bulk_reset(uvc);
 
 	usb_ep_disable(uvc->video.ep);
 	if (uvc->enable_interrupt_ep)
@@ -538,20 +729,23 @@ uvc_copy_descriptors(struct uvc_device *uvc, enum usb_device_speed speed)
 	case USB_SPEED_SUPER:
 		uvc_control_desc = uvc->desc.ss_control;
 		uvc_streaming_cls = uvc->desc.ss_streaming;
-		uvc_streaming_std = uvc_ss_streaming;
+		uvc_streaming_std = uvc->bulk ? uvc_ss_bulk_streaming
+					      : uvc_ss_streaming;
 		break;
 
 	case USB_SPEED_HIGH:
 		uvc_control_desc = uvc->desc.fs_control;
 		uvc_streaming_cls = uvc->desc.hs_streaming;
-		uvc_streaming_std = uvc_hs_streaming;
+		uvc_streaming_std = uvc->bulk ? uvc_hs_bulk_streaming
+					      : uvc_hs_streaming;
 		break;
 
 	case USB_SPEED_FULL:
 	default:
 		uvc_control_desc = uvc->desc.fs_control;
 		uvc_streaming_cls = uvc->desc.fs_streaming;
-		uvc_streaming_std = uvc_fs_streaming;
+		uvc_streaming_std = uvc->bulk ? uvc_fs_bulk_streaming
+					      : uvc_fs_streaming;
 		break;
 	}
 
@@ -678,57 +872,90 @@ uvc_function_bind(struct usb_configuration *c, struct usb_function *f)
 		uvc->func_unbound = false;
 
 	opts = fi_to_f_uvc_opts(f->fi);
-	/* Sanity check the streaming endpoint module parameters. */
-	opts->streaming_interval = clamp(opts->streaming_interval, 1U, 16U);
-	opts->streaming_maxpacket = clamp(opts->streaming_maxpacket, 1U, 3072U);
-	opts->streaming_maxburst = min(opts->streaming_maxburst, 15U);
+	uvc->bulk = opts->streaming_transfer == USB_ENDPOINT_XFER_BULK;
+	if (uvc->bulk) {
+		/*
+		 * streaming_maxpacket is the payload size
+		 * (dwMaxPayloadTransferSize), header included.
+		 */
+		opts->streaming_maxpacket = clamp(roundup(opts->streaming_maxpacket, 1024),
+						  1024U, UVCG_BULK_MAX_PAYLOAD_SIZE);
+		opts->streaming_maxburst = min(opts->streaming_maxburst, 15U);
 
-	/* For SS, wMaxPacketSize has to be 1024 if bMaxBurst is not 0 */
-	if (opts->streaming_maxburst &&
-	    (opts->streaming_maxpacket % 1024) != 0) {
-		opts->streaming_maxpacket = roundup(opts->streaming_maxpacket, 1024);
-		uvcg_info(f, "overriding streaming_maxpacket to %d\n",
-			  opts->streaming_maxpacket);
-	}
+		uvc_fs_streaming_ep.bmAttributes = USB_ENDPOINT_XFER_BULK;
+		uvc_fs_streaming_ep.wMaxPacketSize = cpu_to_le16(64);
+		uvc_fs_streaming_ep.bInterval = 0;
+		uvc_hs_streaming_ep.bmAttributes = USB_ENDPOINT_XFER_BULK;
+		uvc_hs_streaming_ep.wMaxPacketSize = cpu_to_le16(512);
+		uvc_hs_streaming_ep.bInterval = 0;
+		uvc_ss_streaming_ep.bmAttributes = USB_ENDPOINT_XFER_BULK;
+		uvc_ss_streaming_ep.wMaxPacketSize = cpu_to_le16(1024);
+		uvc_ss_streaming_ep.bInterval = 0;
+		uvc_ss_streaming_comp.bmAttributes = 0;
+		uvc_ss_streaming_comp.bMaxBurst = opts->streaming_maxburst;
+		uvc_ss_streaming_comp.wBytesPerInterval = 0;
 
-	/*
-	 * Fill in the FS/HS/SS Video Streaming specific descriptors from the
-	 * module parameters.
-	 *
-	 * NOTE: We assume that the user knows what they are doing and won't
-	 * give parameters that their UDC doesn't support.
-	 */
-	if (opts->streaming_maxpacket <= 1024) {
-		max_packet_mult = 1;
-		max_packet_size = opts->streaming_maxpacket;
-	} else if (opts->streaming_maxpacket <= 2048) {
-		max_packet_mult = 2;
-		max_packet_size = opts->streaming_maxpacket / 2;
+		uvc_streaming_intf_alt0.bNumEndpoints = 1;
+		uvc->video.max_payload_size = opts->streaming_maxpacket;
 	} else {
-		max_packet_mult = 3;
-		max_packet_size = opts->streaming_maxpacket / 3;
+		uvc_fs_streaming_ep.bmAttributes = USB_ENDPOINT_SYNC_ASYNC | USB_ENDPOINT_XFER_ISOC;
+		uvc_hs_streaming_ep.bmAttributes = USB_ENDPOINT_SYNC_ASYNC | USB_ENDPOINT_XFER_ISOC;
+		uvc_ss_streaming_ep.bmAttributes = USB_ENDPOINT_SYNC_ASYNC | USB_ENDPOINT_XFER_ISOC;
+		uvc_streaming_intf_alt0.bNumEndpoints = 0;
+		uvc->video.max_payload_size = 0;
+
+		/* Sanity check the streaming endpoint module parameters. */
+		opts->streaming_interval = clamp(opts->streaming_interval, 1U, 16U);
+		opts->streaming_maxpacket = clamp(opts->streaming_maxpacket, 1U, 3072U);
+		opts->streaming_maxburst = min(opts->streaming_maxburst, 15U);
+
+		/* For SS, wMaxPacketSize has to be 1024 if bMaxBurst is not 0 */
+		if (opts->streaming_maxburst &&
+		    (opts->streaming_maxpacket % 1024) != 0) {
+			opts->streaming_maxpacket = roundup(opts->streaming_maxpacket, 1024);
+			uvcg_info(f, "overriding streaming_maxpacket to %d\n",
+				  opts->streaming_maxpacket);
+		}
+
+		/*
+		 * Fill in the FS/HS/SS Video Streaming specific descriptors from the
+		 * module parameters.
+		 *
+		 * NOTE: We assume that the user knows what they are doing and won't
+		 * give parameters that their UDC doesn't support.
+		 */
+		if (opts->streaming_maxpacket <= 1024) {
+			max_packet_mult = 1;
+			max_packet_size = opts->streaming_maxpacket;
+		} else if (opts->streaming_maxpacket <= 2048) {
+			max_packet_mult = 2;
+			max_packet_size = opts->streaming_maxpacket / 2;
+		} else {
+			max_packet_mult = 3;
+			max_packet_size = opts->streaming_maxpacket / 3;
+		}
+
+		uvc_fs_streaming_ep.wMaxPacketSize =
+			cpu_to_le16(min(opts->streaming_maxpacket, 1023U));
+		uvc_fs_streaming_ep.bInterval = opts->streaming_interval;
+
+		uvc_hs_streaming_ep.wMaxPacketSize =
+			cpu_to_le16(max_packet_size | ((max_packet_mult - 1) << 11));
+
+		/* A high-bandwidth endpoint must specify a bInterval value of 1 */
+		if (max_packet_mult > 1)
+			uvc_hs_streaming_ep.bInterval = 1;
+		else
+			uvc_hs_streaming_ep.bInterval = opts->streaming_interval;
+
+		uvc_ss_streaming_ep.wMaxPacketSize = cpu_to_le16(max_packet_size);
+		uvc_ss_streaming_ep.bInterval = opts->streaming_interval;
+		uvc_ss_streaming_comp.bmAttributes = max_packet_mult - 1;
+		uvc_ss_streaming_comp.bMaxBurst = opts->streaming_maxburst;
+		uvc_ss_streaming_comp.wBytesPerInterval =
+			cpu_to_le16(max_packet_size * max_packet_mult *
+				    (opts->streaming_maxburst + 1));
 	}
-
-	uvc_fs_streaming_ep.wMaxPacketSize =
-		cpu_to_le16(min(opts->streaming_maxpacket, 1023U));
-	uvc_fs_streaming_ep.bInterval = opts->streaming_interval;
-
-	uvc_hs_streaming_ep.wMaxPacketSize =
-		cpu_to_le16(max_packet_size | ((max_packet_mult - 1) << 11));
-
-	/* A high-bandwidth endpoint must specify a bInterval value of 1 */
-	if (max_packet_mult > 1)
-		uvc_hs_streaming_ep.bInterval = 1;
-	else
-		uvc_hs_streaming_ep.bInterval = opts->streaming_interval;
-
-	uvc_ss_streaming_ep.wMaxPacketSize = cpu_to_le16(max_packet_size);
-	uvc_ss_streaming_ep.bInterval = opts->streaming_interval;
-	uvc_ss_streaming_comp.bmAttributes = max_packet_mult - 1;
-	uvc_ss_streaming_comp.bMaxBurst = opts->streaming_maxburst;
-	uvc_ss_streaming_comp.wBytesPerInterval =
-		cpu_to_le16(max_packet_size * max_packet_mult *
-			    (opts->streaming_maxburst + 1));
 
 	/* Allocate endpoints. */
 	if (opts->enable_interrupt_ep) {
@@ -926,6 +1153,7 @@ static struct usb_function_instance *uvc_alloc_inst(void)
 		return ERR_PTR(-ENOMEM);
 	opts->func_inst.free_func_inst = uvc_free_inst;
 	mutex_init(&opts->lock);
+	opts->streaming_transfer = USB_ENDPOINT_SYNC_ASYNC | USB_ENDPOINT_XFER_ISOC;
 
 	cd = &opts->uvc_camera_terminal;
 	cd->bLength			= UVC_DT_CAMERA_TERMINAL_SIZE(3);
@@ -1037,6 +1265,8 @@ static void uvc_function_unbind(struct usb_configuration *c,
 	}
 
 	kthread_cancel_work_sync(&video->hw_submit);
+	cancel_work_sync(&uvc->bulk_stop_work);
+	cancel_delayed_work_sync(&uvc->bulk_idle_work);
 
 	if (video->async_wq)
 		destroy_workqueue(video->async_wq);
@@ -1101,6 +1331,9 @@ static struct usb_function *uvc_alloc(struct usb_function_instance *fi)
 	uvc->func_unbound = true;
 	uvc->state = UVC_STATE_DISCONNECTED;
 	init_waitqueue_head(&uvc->func_connected_queue);
+	spin_lock_init(&uvc->bulk_lock);
+	INIT_WORK(&uvc->bulk_stop_work, uvc_function_bulk_stop_work);
+	INIT_DELAYED_WORK(&uvc->bulk_idle_work, uvc_function_bulk_idle_work);
 	opts = fi_to_f_uvc_opts(fi);
 
 	mutex_lock(&opts->lock);
