@@ -112,7 +112,9 @@ Process model (from MSD): `service.sh` → `app_process` runs
 auth pipe. The daemon drops to `system:system`, keeping only `CAP_CHOWN`
 (configfs creates new nodes as `root:root`, so it must `chown` them),
 `CAP_SYS_NICE` (USB IRQ thread priority) and the `readproc` group (to see
-kernel threads through `/proc`'s `hidepid`). It listens on `@uvcamerad` and
+kernel threads through `/proc`'s `hidepid`). Where a gadget HAL keeps the
+gadget `root:root` (0770, attributes 0644) instead of init handing it to
+system, it also keeps `CAP_DAC_OVERRIDE`. It listens on `@uvcamerad` and
 asks the supervisor to authorize every peer UID: at connect, and again on
 every control request.
 

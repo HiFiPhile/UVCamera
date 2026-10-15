@@ -397,6 +397,7 @@ Device matrix (to fill from `doctor.log`):
 | Device | Android | Kernel | F_UVC | UDC / max speed | Root | Status |
 |---|---|---|---|---|---|---|
 | OnePlus 15 (CPH2747, Qualcomm) | 16 (API 36) | 6.12.58 GKI android16 | `=y` | a600000.dwc3 / super-speed(-plus) | KernelSU | doctor ✅, Phase 1 ✅ on Windows (MJPEG 1080p30) |
+| Nothing Phone (2) (A065, Qualcomm) | 16 (API 36) | 5.10.237 GKI android12 | `=y` | a600000.dwc3 / super-speed-plus | KernelSU | Gadget HAL (`usb.gadget@1.2-service-qti`) keeps configfs root's: daemon needs CAP_DAC_OVERRIDE. Read-only `bmControls` (brightness and AE mode only). Enable ✅ (test pattern, host at high speed); camera streaming and replug with the HAL untested |
 
 ### Device notes: OnePlus 15 (CPH2747), 2026-10-12
 
