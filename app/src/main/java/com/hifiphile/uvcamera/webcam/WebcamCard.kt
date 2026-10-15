@@ -22,11 +22,12 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,6 +77,25 @@ fun WebcamStatusCard(viewModel: WebcamViewModel = viewModel()) {
     }
 
     val status = (daemon as? DaemonState.Connected)?.status
+    val cameraGranted = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.CAMERA,
+    ) == PackageManager.PERMISSION_GRANTED
+
+    // The webcam stays on when the app's process goes away (an update, or
+    // Android reclaiming memory), and the host gets the test pattern. Attach
+    // the camera again when the app is opened, once: after Turn off, the
+    // daemon may still report the webcam on for a moment.
+    var resumeChecked by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(status != null) {
+        if (status != null && !resumeChecked) {
+            resumeChecked = true
+            if (status.enabled && !service.running && cameraGranted) {
+                WebcamService.start(context)
+            }
+        }
+    }
+    // Without the camera permission, Turn on is the way to grant it.
+    val on = service.running || (status?.enabled == true && cameraGranted)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -88,24 +108,14 @@ fun WebcamStatusCard(viewModel: WebcamViewModel = viewModel()) {
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleMedium,
                 )
-                if (service.running) {
+                if (on) {
                     OutlinedButton(onClick = { WebcamService.stop(context) }) {
                         Text(stringResource(R.string.webcam_disable))
                     }
                 } else {
-                    // Enabled without the app (test pattern, or the app was
-                    // restarted): turning on attaches the camera to it.
-                    if (status?.enabled == true) {
-                        TextButton(onClick = { WebcamService.stop(context) }) {
-                            Text(stringResource(R.string.webcam_disable))
-                        }
-                    }
                     Button(
                         onClick = {
-                            val granted = ContextCompat.checkSelfPermission(
-                                context, Manifest.permission.CAMERA,
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (granted) {
+                            if (cameraGranted) {
                                 WebcamService.start(context)
                             } else {
                                 permissions.launch(buildList {
