@@ -197,19 +197,8 @@ pub fn subcommand_sepatch(cli: &SepatchCli) -> Result<()> {
         t_daemon,
         t_daemon,
         c_capability,
-        ["chown", "setuid", "setgid", "sys_nice", "sys_module"]
+        ["chown", "setuid", "setgid", "sys_nice"]
     );
-
-    // Loading the usb_f_uvcx module that ships next to the daemon, labeled
-    // system_file like the rest of the module directory under /data/adb,
-    // which the daemon opens before dropping root.
-    allow!(t_daemon, t_system_file, c!("system")?, ["module_load"]);
-    allow!(t_daemon, t_system_file, c_dir, ["search"]);
-    for name in ["system_data_root_file", "adb_data_file"] {
-        if let Some(t) = pdb.get_type_id(name) {
-            allow!(t_daemon, t, c_dir, ["search"]);
-        }
-    }
     allow!(
         t_daemon,
         t_daemon,

@@ -6,14 +6,11 @@
 //!
 //! At most one source is attached. The stream thread announces each host
 //! stream with a fresh id; the source thread stores frames tagged with the
-//! current id. Formats whose frames stand alone keep only the newest one.
-//! H.264 frames depend on each other, so they queue in order; if the queue
-//! overflows, frames are dropped up to the next IDR frame, which the source
-//! is asked for. Writes to the app use a short timeout so a stuck app can
-//! never stall the USB stream.
+//! current id, keeping only the newest one. Writes to the app use a short
+//! timeout so a stuck app can never stall the USB stream.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     io::{self, Write},
     os::{
         fd::{AsFd, BorrowedFd, OwnedFd},
@@ -32,28 +29,6 @@ use crate::{
 };
 
 const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
-/// H.264 frames waiting for a free buffer before the queue counts as
-/// overflowing: a few frame intervals.
-const MAX_QUEUED: usize = 8;
-
-/// Whether an H.264 access unit (Annex B) starts a new coded video sequence:
-/// it contains an SPS or an IDR slice.
-pub fn is_h264_key_frame(data: &[u8]) -> bool {
-    let mut zeros = 0;
-    for (i, &b) in data.iter().enumerate() {
-        // nal_unit_type: 5 IDR slice, 7 SPS.
-        if b == 1
-            && zeros >= 2
-            && data
-                .get(i + 1)
-                .is_some_and(|&header| matches!(header & 0x1f, 5 | 7))
-        {
-            return true;
-        }
-        zeros = if b == 0 { zeros + 1 } else { 0 };
-    }
-    false
-}
 
 struct Attached {
     id: u64,
@@ -67,11 +42,9 @@ struct Inner {
     /// The host stream currently being served.
     stream: Option<(u32, StreamParams)>,
     next_stream_id: u32,
-    /// Frames for the current stream that the stream thread hasn't taken
-    /// yet: at most one unless the stream is H.264.
-    pending: VecDeque<(Frame, Instant)>,
-    /// H.264: frames are dropped until the next key frame.
-    need_key_frame: bool,
+    /// Newest frame for the current stream that the stream thread hasn't
+    /// taken yet.
+    pending: Option<(Frame, Instant)>,
     /// Control values the host set in the current session.
     controls: BTreeMap<ControlId, i32>,
 }
@@ -160,7 +133,7 @@ impl SourceHub {
         let mut inner = self.inner.lock().unwrap();
         if inner.source.as_ref().is_some_and(|s| s.id == id) {
             inner.source = None;
-            inner.pending.clear();
+            inner.pending = None;
             info!("Frame source {id} detached");
         }
     }
@@ -176,8 +149,7 @@ impl SourceHub {
         let stream_id = inner.next_stream_id;
         inner.next_stream_id = inner.next_stream_id.wrapping_add(1);
         inner.stream = Some((stream_id, params));
-        inner.pending.clear();
-        inner.need_key_frame = !params.kind.is_intra_only();
+        inner.pending = None;
         inner.send(&SourceEvent::StreamStart { stream_id, params });
         stream_id
     }
@@ -210,7 +182,7 @@ impl SourceHub {
     pub fn stream_stopped(&self) {
         let mut inner = self.inner.lock().unwrap();
         if let Some((stream_id, _)) = inner.stream.take() {
-            inner.pending.clear();
+            inner.pending = None;
             inner.send(&SourceEvent::StreamStop { stream_id });
         }
     }
@@ -222,57 +194,23 @@ impl SourceHub {
         if inner.source.as_ref().is_none_or(|s| s.id != source_id) {
             return;
         }
-        let Some((stream_id, params)) = inner.stream else {
-            debug!("Dropping frame for stream {}", frame.stream_id);
-            return;
-        };
-        if stream_id != frame.stream_id {
-            debug!("Dropping frame for stream {}", frame.stream_id);
-            return;
-        }
-
-        if params.kind.is_intra_only() {
-            inner.pending.clear();
-        } else {
-            if inner.need_key_frame {
-                if !is_h264_key_frame(&frame.data) {
-                    return;
-                }
-                inner.need_key_frame = false;
+        match inner.stream {
+            Some((stream_id, _)) if stream_id == frame.stream_id => {
+                inner.pending = Some((frame, Instant::now()));
+                let _ = rustix::io::write(&self.notify, &1u64.to_ne_bytes());
             }
-            if inner.pending.len() >= MAX_QUEUED {
-                // The host can't keep up: resynchronize at the next IDR.
-                warn!(
-                    "Dropping {} queued H.264 frames; requesting a key frame",
-                    inner.pending.len()
-                );
-                inner.pending.clear();
-                inner.need_key_frame = true;
-                inner.send(&SourceEvent::KeyFrame { stream_id });
-                return;
-            }
+            _ => debug!("Dropping frame for stream {}", frame.stream_id),
         }
-        inner.pending.push_back((frame, Instant::now()));
-        let _ = rustix::io::write(&self.notify, &1u64.to_ne_bytes());
     }
 
-    /// Take the oldest unconsumed frame for `stream_id`, with the time it
+    /// Take the newest unconsumed frame for `stream_id`, with the time it
     /// arrived.
     pub fn take(&self, stream_id: u32) -> Option<(Frame, Instant)> {
         let mut inner = self.inner.lock().unwrap();
-        match inner.pending.front() {
-            Some((frame, _)) if frame.stream_id == stream_id => inner.pending.pop_front(),
+        match &inner.pending {
+            Some((frame, _)) if frame.stream_id == stream_id => inner.pending.take(),
             _ => None,
         }
-    }
-
-    /// Whether a frame for `stream_id` is waiting.
-    pub fn has_frame(&self, stream_id: u32) -> bool {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .pending
-            .front()
-            .is_some_and(|(frame, _)| frame.stream_id == stream_id)
     }
 }
 
@@ -348,65 +286,6 @@ mod tests {
         );
         hub.detach(replacement);
         assert!(!hub.is_attached());
-    }
-
-    #[test]
-    fn detects_h264_key_frames() {
-        // SPS, PPS, IDR slice; then a P slice alone.
-        assert!(is_h264_key_frame(&[
-            0, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0, 0, 1, 0x65
-        ]));
-        assert!(is_h264_key_frame(&[0, 0, 1, 0x65, 0x88]));
-        assert!(!is_h264_key_frame(&[0, 0, 0, 1, 0x41, 0x9a]));
-        assert!(!is_h264_key_frame(&[0, 0, 0, 1]));
-    }
-
-    #[test]
-    fn h264_frames_queue_in_order() {
-        const H264: StreamParams = StreamParams {
-            kind: FormatKind::H264,
-            ..PARAMS
-        };
-        let idr = |stream_id| Frame {
-            stream_id,
-            pts_us: 0,
-            data: vec![0, 0, 0, 1, 0x65],
-        };
-        let p = |stream_id, byte| Frame {
-            stream_id,
-            pts_us: 0,
-            data: vec![0, 0, 0, 1, 0x41, byte],
-        };
-
-        let hub = SourceHub::default();
-        let (daemon_end, app_end) = UnixStream::pair().unwrap();
-        let mut events = BufReader::new(app_end);
-        let source = hub.attach(daemon_end).unwrap();
-        let id = hub.stream_started(H264);
-        SourceEvent::read_from(&mut events).unwrap();
-
-        // Frames before the first key frame are useless.
-        hub.submit(source, p(id, 0));
-        assert!(!hub.has_frame(id));
-        hub.submit(source, idr(id));
-        hub.submit(source, p(id, 1));
-        assert_eq!(hub.take(id).unwrap().0.data, idr(id).data);
-        assert_eq!(hub.take(id).unwrap().0.data, p(id, 1).data);
-        assert!(hub.take(id).is_none());
-
-        // Overflow drops the queue and asks for a key frame.
-        for i in 0..MAX_QUEUED as u8 + 1 {
-            hub.submit(source, p(id, i));
-        }
-        assert!(!hub.has_frame(id));
-        assert_eq!(
-            SourceEvent::read_from(&mut events).unwrap(),
-            SourceEvent::KeyFrame { stream_id: id }
-        );
-        hub.submit(source, p(id, 9));
-        assert!(!hub.has_frame(id));
-        hub.submit(source, idr(id));
-        assert!(hub.has_frame(id));
     }
 
     #[test]

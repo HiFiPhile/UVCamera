@@ -74,7 +74,7 @@ are produced in the app and handed to the daemon, which owns the V4L2 device.
     ├─ WebcamService   foreground service (type=camera); owns the session
     ├─ daemon/Client   protocol client (mirrors uvcd's ipc/message)
     ├─ camera/         Camera2 source; capability discovery → FormatSpec
-    ├─ encoder/        HW JPEG | libjpeg-turbo MJPEG | YUYV | MediaCodec H.264
+    ├─ encoder/        HW JPEG | libjpeg-turbo MJPEG | YUYV
     └─ ui/             Compose: status, camera + format choice, controls
 ```
 
@@ -109,12 +109,10 @@ A single static binary per ABI with subcommands:
 Process model (from MSD): `service.sh` → `app_process` runs
 `standalone.AuthSupervisor` as root. The supervisor spawns
 `runcon u:r:uvcamera_daemon:s0 uvcd daemon` with its stdin/stdout as a private
-auth pipe. The daemon opens the experimental kernel module, if there is
-one for the running kernel, then drops to `system:system`, keeping only
-`CAP_CHOWN` (configfs creates new nodes as `root:root`, so it must `chown`
-them), `CAP_SYS_NICE` (USB IRQ thread priority), `CAP_SYS_MODULE` (loading
-that module when the app opts in) and the `readproc` group (to see kernel
-threads through `/proc`'s `hidepid`). It listens on `@uvcamerad` and
+auth pipe. The daemon drops to `system:system`, keeping only `CAP_CHOWN`
+(configfs creates new nodes as `root:root`, so it must `chown` them),
+`CAP_SYS_NICE` (USB IRQ thread priority) and the `readproc` group (to see
+kernel threads through `/proc`'s `hidepid`). It listens on `@uvcamerad` and
 asks the supervisor to authorize every peer UID: at connect, and again on
 every control request.
 
@@ -138,9 +136,6 @@ arrives and a buffer is free. If none arrives within 1.5 frame intervals,
 the last one is repeated (for up to 1 s), then the test pattern is sent as a
 "camera not ready" placeholder. YUYV frames must be exactly w×h×2 bytes and
 MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
-H.264 frames (experimental kernel module only) depend on each other: they
-queue in order and are never repeated; on overflow the queue is dropped up
-to the next IDR, which the app is asked for.
 
 ### App (Kotlin + Compose, `app/`)
 
@@ -164,7 +159,6 @@ to the next IDR, which the app is asked for.
   | Camera2 `JPEG` stream | MJPEG | 0.7 ms copy per frame | The camera supports the size at the frame rate and no rotation is needed |
   | `YUV_420_888` → NV21 → `YuvImage` | MJPEG | ~38 ms per frame, two worker threads → 30 fps | Smaller sizes without hardware JPEG (720p/480p here), or rotated |
   | `YUV_420_888` → YUYV repack | Uncompressed | a few ms | YUYV streams; USB 2.0 limits it to 640×480@30 |
-  | MediaCodec AVC | H.264 (UVC 1.5 frame-based) | HW | Phase 5; needs `streaming/framebased` |
 
 - **Orientation:** sensor images arrive unrotated. For a landscape mount (top
   of the phone to the left) the correction is `sensor − 90°` for back
@@ -242,7 +236,6 @@ selected camera's streamable sizes (≥ 30 fps), clipped to bandwidth:
 |---|---|---|
 | MJPEG | 1920×1080, 1280×720, 640×480 @ 30/15 fps | 1080p30 ≈ 3–9 MB/s, fine |
 | YUYV | 640×480 @ 30, 1280×720 @ 10 | 640×480×2×30 = 18.4 MB/s, at the limit |
-| H.264 (frame-based) | as MJPEG, only with the experimental kernel module | ≈ 1.5 MB/s |
 
 `streaming_maxpacket=3072` (HS high-bandwidth, 3×1024) and, on SuperSpeed
 UDCs, `streaming_maxburst` raise isochronous throughput. On pre-6.13 kernels,
@@ -256,21 +249,19 @@ only newer kernels have.
 
 ## IPC protocol
 
-Abstract Unix stream socket `@uvcamerad`, protocol version 5 (`message.rs`,
+Abstract Unix stream socket `@uvcamerad`, protocol version 4 (`message.rs`,
 mirrored by `Message.kt`, with golden-byte tests on both sides). After a
 version handshake, a connection carries tagged little-endian messages in
 MSD's style. Malformed input closes the connection.
 
 - **Control connection:** request/response. `GetStatus` → `Status` (enabled,
   host link speed, current stream, fps sent, fps received from the app,
-  failed frames, kernel module state), `Enable(maxburst, formats,
-  controls, kernel_module)`, `Disable`. The
+  failed frames), `Enable(maxburst, formats, controls)`, `Disable`. The
   control capabilities (zoom range, focus, white balance, power line) set
   the units' `bmControls`; brightness is always offered.
 - **Source connection:** a second connection sends `AttachSource` and then
   carries frames. The daemon sends `StreamStart(stream_id, params)`,
-  `StreamStop(stream_id)`, `Control(id, value)` and `KeyFrame(stream_id)`
-  (H.264: send an IDR next); on attach it replays
+  `StreamStop(stream_id)` and `Control(id, value)`; on attach it replays
   the current control values and stream. The app sends `Frame(stream_id, pts_us, bytes)`,
   where `pts_us` is the sensor capture time in CLOCK_MONOTONIC (for latency
   stats). Frames for an old `stream_id` are dropped, so a format switch
@@ -355,10 +346,11 @@ configfs.
    never load their UVC driver. It would need host software and a virtual
    camera on every OS.
 5. **Our own UVC function module with bulk transfers and H.264**
-   (`kmod/`). Built and working, but kept as an opt-in experiment: hosts
-   support H.264 poorly (Windows Camera ignores it, OBS adds latency), and
-   MJPEG 1080p30 already fits isochronous transfers. See PLAN.md,
-   "Experiment: kernel module with bulk + H.264".
+   (`kmod/`). Built and working, but rejected: hosts support H.264 poorly
+   (Windows Camera ignores it, OBS adds latency), and MJPEG 1080p30 already
+   fits isochronous transfers. The H.264 path was removed; the module stays
+   for bulk experiments with `uvcd gadget up`. See PLAN.md, "Experiment:
+   kernel module with bulk + H.264".
 
 ## Repository layout
 
@@ -367,7 +359,7 @@ Cargo.toml              Rust workspace
 uvcd/                   privileged daemon/CLI (Rust)
 app/                    Android app (Kotlin, Compose)
 app/module/             Magisk/KernelSU module scripts
-kmod/                   experimental usb_f_uvcx kernel module (bulk, H.264)
+kmod/                   experimental usb_f_uvcx kernel module (bulk)
 docs/ARCHITECTURE.md    this file
 docs/PLAN.md            phased plan and test strategy
 ```

@@ -98,7 +98,6 @@ impl TestPattern {
                 rgb_to_yuyv(&self.rgb, &mut self.yuyv);
                 Ok(&self.yuyv)
             }
-            FormatKind::H264 => anyhow::bail!("There is no H.264 test pattern"),
         }
     }
 

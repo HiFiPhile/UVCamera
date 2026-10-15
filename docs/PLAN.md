@@ -330,7 +330,8 @@ our own driver or software plus a virtual camera on every OS. The stock
 DeviceAsWebcam is installed on the OnePlus 15 but hidden
 (`ro.usb.uvc.enabled` unset, only Qualcomm `diag,uvc` compositions).
 
-**What was built** (commits ba95d07..0365b65):
+**What was built** (commits ba95d07..0365b65; the H.264 path was removed
+afterwards):
 
 - `kmod/usb_f_uvcx.ko`: upstream's UVC gadget (v7.3-rc7) as a loadable
   function named `uvcx`, beside the built-in `uvc`. Built against the GKI
@@ -373,11 +374,14 @@ Bulk alone mainly helps uncompressed video: USB 3 bulk could carry about
 H.264/H.265 in any case. Costs: one module build per GKI KMI (the GKI tree
 isn't in CI), and a module bug can crash the phone.
 
-The code stays as an opt-in experiment: release builds don't include the
-module (CI can't build it), and the app only shows the H.264 chip when the
-daemon has a module for the running kernel. Revisit if hosts get
-low-latency H.264 UVC decoding, uncompressed 1080p60 becomes a goal, or a
-future GKI's built-in function has frame-based formats.
+The H.264 path is removed again: the app's encoder, GL transform and
+kernel module option, the daemon's H.264 format, ordered frame queue and
+module loading (with its CAP_SYS_MODULE and policy rules), and protocol v5;
+the protocol is back at v4. `kmod/` stays for bulk experiments, driven by
+`uvcd gadget up --function uvcx --transfer bulk` with the test pattern.
+The removed code is in git history (f5a37ca, 0365b65). Revisit if hosts
+get low-latency H.264 UVC decoding, uncompressed 1080p60 becomes a goal,
+or a future GKI's built-in function has frame-based formats.
 
 ## Test strategy
 

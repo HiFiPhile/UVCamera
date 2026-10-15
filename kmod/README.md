@@ -1,8 +1,9 @@
 # usb_f_uvcx
 
-**Experimental, not part of releases.** It works, but H.264 over UVC isn't
-worth it with today's hosts; see docs/PLAN.md, "Experiment: kernel module
-with bulk + H.264".
+**Experimental, not part of the app or releases.** It works, but H.264
+over UVC isn't worth it with today's hosts, and the app's H.264 path was
+removed; see docs/PLAN.md, "Experiment: kernel module with bulk + H.264".
+Use it with `uvcd gadget up --function uvcx [--transfer bulk]`.
 
 The Linux UVC gadget function (`drivers/usb/gadget/function/*uvc*`) from
 upstream, built as an out-of-tree module that registers itself as `uvcx`.
@@ -57,9 +58,8 @@ kmod/build.sh
 
 This builds against the tree described below and writes
 `out/usb_f_uvcx.<KMI>.ko` (`GKI_KMI` in `~/Android/gki/env.sh`, e.g.
-`android16-6.12-6`: Android release, kernel version, KMI generation), which
-the module zip includes. uvcd loads the one matching the running kernel
-when the app enables the webcam with H.264.
+`android16-6.12-6`: Android release, kernel version, KMI generation). Load
+it with `insmod` before `uvcd gadget up --function uvcx`.
 
 `~/Android/gki` holds `kernel/common` at 925a103d123c (from
 `/proc/version`), clang r536225, the phone's `/proc/config.gz` as

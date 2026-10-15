@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 HiFiPhile
 # SPDX-License-Identifier: GPL-3.0-only
 # Build usb_f_uvcx against the GKI kernel set up as described in README.md,
-# into out/usb_f_uvcx.<KMI>.ko, which the module zip picks up.
+# into out/usb_f_uvcx.<KMI>.ko.
 set -eu
 
 . "${GKI_ENV:-${HOME}/Android/gki/env.sh}"

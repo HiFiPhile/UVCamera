@@ -5,9 +5,8 @@
 
 //! The daemon the app talks to. It runs in the `uvcamera_daemon` SELinux
 //! domain as the system user with only CAP_CHOWN (configfs creates nodes as
-//! root), CAP_SYS_NICE (USB IRQ thread priority) and CAP_SYS_MODULE (the
-//! usb_f_uvcx module next to it), plus the readproc group to see kernel
-//! threads in /proc. It owns at most one gadget [`Session`].
+//! root) and CAP_SYS_NICE (USB IRQ thread priority), plus the readproc group
+//! to see kernel threads in /proc. It owns at most one gadget [`Session`].
 //!
 //! A root `app_process` supervisor started it and answers, over inherited
 //! pipes, whether a peer UID belongs to the UVCamera package signed with the
@@ -19,7 +18,7 @@ use std::{
     fs::File,
     io,
     os::unix::net::{SocketAddr, UnixListener, UnixStream},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -44,8 +43,7 @@ use tracing::{debug, error, info, info_span, trace, warn};
 
 use crate::{
     auth::Authenticator,
-    gadget::{EndpointConfig, FUNCTION_UVC, FUNCTION_UVCX, Gadget, Transfer},
-    kmod,
+    gadget::{EndpointConfig, Gadget, Transfer},
     message::{self, EnableRequest, Frame, Request, Response, Status},
     session::{Session, SessionConfig, teardown},
     source::SourceHub,
@@ -59,8 +57,6 @@ const SYSTEM_UID: u32 = 1000;
 /// the IRQ boost needs to see kernel threads.
 const READPROC_GID: u32 = 3009;
 const MAXPACKET: u32 = 3072;
-/// Bulk payload: a whole H.264 or MJPEG frame in most cases.
-const BULK_PAYLOAD: u32 = 512 * 1024;
 
 pub fn socket_addr() -> SocketAddr {
     SocketAddr::from_abstract_name(message::SOCKET_NAME).expect("Invalid abstract socket name")
@@ -93,16 +89,13 @@ fn check_selinux() -> Result<()> {
 fn drop_privileges() -> Result<()> {
     let system_uid = Uid::from_raw(SYSTEM_UID);
     let system_gid = Gid::from_raw(SYSTEM_UID);
-    let needed = CapabilitySet::CHOWN | CapabilitySet::SYS_NICE | CapabilitySet::SYS_MODULE;
+    let needed = CapabilitySet::CHOWN | CapabilitySet::SYS_NICE;
 
     let uid = rustix::process::getuid();
     if uid == system_uid {
         let caps = rustix::thread::capabilities(None).context("Failed to query capabilities")?;
         if !caps.permitted.contains(needed) {
-            bail!(
-                "CAP_CHOWN, CAP_SYS_NICE and CAP_SYS_MODULE are required when running as the \
-                 system user"
-            );
+            bail!("CAP_CHOWN and CAP_SYS_NICE are required when running as the system user");
         }
     } else if uid.is_root() {
         rustix::thread::set_keep_capabilities(true)
@@ -133,18 +126,6 @@ fn drop_privileges() -> Result<()> {
     Ok(())
 }
 
-/// The directory the daemon's binary is in. The supervisor runs it by its
-/// absolute path; our SELinux domain can't read `/proc/self/exe`.
-fn module_dir() -> Result<PathBuf> {
-    let exe = match std::env::args_os().next().map(PathBuf::from) {
-        Some(path) if path.is_absolute() => path,
-        _ => std::env::current_exe().context("Failed to find the daemon's path")?,
-    };
-    exe.parent()
-        .map(Path::to_path_buf)
-        .context("The daemon's path has no parent")
-}
-
 struct Daemon {
     gadget: Gadget,
     auth: Authenticator,
@@ -154,8 +135,6 @@ struct Daemon {
     source: Arc<SourceHub>,
     udc: Option<String>,
     check_selinux: bool,
-    /// The kernel module for this kernel, next to the daemon.
-    module: Option<kmod::Module>,
 }
 
 impl Daemon {
@@ -176,17 +155,14 @@ impl Daemon {
             }
         }
 
-        let kernel_module = kmod::state(self.module.as_ref());
         match &*session {
             Some(s) => Status {
                 enabled: true,
                 stream: s.status(),
-                kernel_module,
             },
             None => Status {
                 enabled: false,
                 stream: StreamStatus::default(),
-                kernel_module,
             },
         }
     }
@@ -197,47 +173,24 @@ impl Daemon {
             warn!("Previous session failed: {e:?}");
         }
 
-        let (gadget, endpoint) = if request.kernel_module {
-            kmod::load(self.module.as_ref())?;
-            let endpoint = EndpointConfig {
-                transfer: Transfer::Bulk,
-                maxpacket: BULK_PAYLOAD,
-                maxburst: request.maxburst.into(),
-            };
-            (self.gadget.clone().with_function(FUNCTION_UVCX), endpoint)
-        } else {
-            if let Some(f) = request.formats.iter().find(|f| !f.kind.is_intra_only()) {
-                bail!("{} needs the kernel module", f.kind);
-            }
-            let endpoint = EndpointConfig {
-                transfer: Transfer::Isoc,
-                maxpacket: MAXPACKET,
-                maxburst: request.maxburst.into(),
-            };
-            (self.gadget.clone(), endpoint)
-        };
-
         // Control values belong to a session (and its camera).
         self.source.reset_controls();
         *session = Some(Session::start(
-            gadget,
+            self.gadget.clone(),
             SessionConfig {
                 specs: request.formats.clone(),
                 controls: request.controls,
-                endpoint,
+                endpoint: EndpointConfig {
+                    transfer: Transfer::Isoc,
+                    maxpacket: MAXPACKET,
+                    maxburst: request.maxburst.into(),
+                },
                 udc: self.udc.clone(),
                 irq_boost: true,
             },
             self.source.clone(),
         )?);
-        info!(
-            "Enabled{}",
-            if request.kernel_module {
-                " with the kernel module"
-            } else {
-                ""
-            }
-        );
+        info!("Enabled");
         Ok(())
     }
 
@@ -335,21 +288,15 @@ impl Daemon {
 }
 
 pub fn subcommand_daemon(cli: &DaemonCli) -> Result<()> {
-    // Grab the supervisor pipes and the kernel module (only root can reach
-    // it), then drop root before anything else.
+    // Grab the supervisor pipes and drop root before anything else.
     let auth = Authenticator::new()?;
-    let module = kmod::Module::open(&module_dir()?);
     drop_privileges()?;
 
     let gadget = Gadget::new(&cli.gadget, &cli.config)?;
-    for function in [FUNCTION_UVC, FUNCTION_UVCX] {
-        let g = gadget.clone().with_function(function);
-        if g.function_exists() || g.is_linked() {
-            warn!("Removing {function} function left over from a previous run");
-            teardown(&g, None)?;
-        }
+    if gadget.function_exists() || gadget.is_linked() {
+        warn!("Removing UVC function left over from a previous run");
+        teardown(&gadget, None)?;
     }
-
 
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [libc::SIGINT, libc::SIGTERM] {
@@ -371,7 +318,6 @@ pub fn subcommand_daemon(cli: &DaemonCli) -> Result<()> {
         source: Arc::new(SourceHub::default()),
         udc: cli.udc.clone(),
         check_selinux: !cli.no_selinux_check,
-        module,
     });
 
     while !stop.load(Ordering::Relaxed) {

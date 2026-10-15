@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 HiFiPhile
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Daemon protocol, version 5. Mirrored by the app's `daemon/Message.kt`.
+//! Daemon protocol, version 4. Mirrored by the app's `daemon/Message.kt`.
 //!
 //! After connecting, the client sends the protocol version (u8) and the
 //! daemon answers 1 (accepted) or 0. Then the client sends requests and
@@ -10,27 +10,22 @@
 //!
 //! ```text
 //! Request  := 1 GetStatus
-//!           | 2 Enable  maxburst:u8 count:u8 FormatSpec* ControlCaps options:u8
+//!           | 2 Enable  maxburst:u8 count:u8 FormatSpec* ControlCaps
 //!           | 3 Disable
 //!           | 4 AttachSource
 //! FormatSpec := kind:u8 count:u8 (width:u16 height:u16 count:u8 interval:u32*)*
 //! ControlCaps := flags:u8 [zoom_min:u16 zoom_max:u16]
 //!   flags: 1 zoom (followed by its range in hundredths), 2 focus,
 //!          4 white balance, 8 power line frequency
-//!   options: 1 kernel module (the usb_f_uvcx function, bulk streaming;
-//!            required for H.264)
 //! Response := 0 Error   message:string
 //!           | 1 Status  enabled:u8 speed:u8 streaming:u8 [StreamParams]
 //!                       fps_milli:u32 source_fps_milli:u32 failed:u32
-//!                       kernel_module:u8
 //!           | 2 Ok
 //! StreamParams := kind:u8 width:u16 height:u16 interval:u32 max_frame_size:u32
 //! ```
 //!
-//! `kind` is 0 for MJPEG, 1 for YUYV and 2 for H.264. `speed` is the
-//! kernel's `enum usb_device_speed`, or 0 when no host has configured the
-//! function. `kernel_module` is 0 when no usb_f_uvcx module matches the
-//! kernel, 1 when one does, 2 when it is loaded.
+//! `kind` is 0 for MJPEG and 1 for YUYV. `speed` is the kernel's
+//! `enum usb_device_speed`, or 0 when no host has configured the function.
 //!
 //! After `AttachSource` is answered with `Ok`, the connection becomes the
 //! frame source channel and carries no more requests:
@@ -39,15 +34,11 @@
 //! daemon -> app := 1 StreamStart stream_id:u32 StreamParams
 //!                | 2 StreamStop  stream_id:u32
 //!                | 3 Control     control:u8 value:i32
-//!                | 4 KeyFrame    stream_id:u32
 //! app -> daemon := 1 Frame stream_id:u32 pts_us:u64 len:u32 data[len]
 //! ```
 //!
 //! The app produces frames in the format of the latest `StreamStart` and
 //! tags them with its `stream_id`; frames for any other id are dropped.
-//! H.264 frames are access units in Annex B, sent in decoding order; each
-//! stream starts with an IDR frame preceded by its SPS and PPS. `KeyFrame`
-//! asks for another one, after the daemon had to drop frames.
 //! `Control` carries a camera control the host changed (and the current
 //! values when the source attaches). Control ids are those of
 //! [`ControlId::wire`]: 1 brightness (0..=255, 128 = no change), 2 zoom
@@ -69,11 +60,11 @@ use crate::{
     v4l2::Speed,
 };
 
-pub const PROTOCOL_VERSION: u8 = 5;
+pub const PROTOCOL_VERSION: u8 = 4;
 /// Abstract Unix socket name.
 pub const SOCKET_NAME: &str = "uvcamerad";
 
-const MAX_FORMATS: usize = FormatKind::ALL.len();
+const MAX_FORMATS: usize = 2;
 const MAX_FRAMES: usize = 32;
 const MAX_INTERVALS: usize = 16;
 /// Upper bound on one frame from the app, well above 1080p YUYV (4 MB).
@@ -108,7 +99,6 @@ fn read_kind(r: &mut impl Read) -> io::Result<FormatKind> {
     match r.read_u8()? {
         0 => Ok(FormatKind::Mjpeg),
         1 => Ok(FormatKind::Yuyv),
-        2 => Ok(FormatKind::H264),
         k => Err(invalid(format!("Invalid format kind: {k}"))),
     }
 }
@@ -117,7 +107,6 @@ fn write_kind(w: &mut impl Write, kind: FormatKind) -> io::Result<()> {
     w.write_u8(match kind {
         FormatKind::Mjpeg => 0,
         FormatKind::Yuyv => 1,
-        FormatKind::H264 => 2,
     })
 }
 
@@ -230,40 +219,6 @@ pub struct EnableRequest {
     pub maxburst: u8,
     pub formats: Vec<FormatSpec>,
     pub controls: ControlCaps,
-    /// Use the usb_f_uvcx module with bulk streaming.
-    pub kernel_module: bool,
-}
-
-const OPTION_KERNEL_MODULE: u8 = 1;
-
-/// Whether the usb_f_uvcx kernel module can be used.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ModuleState {
-    /// No module was built for this kernel.
-    #[default]
-    Unavailable,
-    /// There is one for this kernel; it loads when enabled with it.
-    Available,
-    Loaded,
-}
-
-impl ModuleState {
-    fn wire(self) -> u8 {
-        match self {
-            Self::Unavailable => 0,
-            Self::Available => 1,
-            Self::Loaded => 2,
-        }
-    }
-
-    fn from_wire(value: u8) -> io::Result<Self> {
-        match value {
-            0 => Ok(Self::Unavailable),
-            1 => Ok(Self::Available),
-            2 => Ok(Self::Loaded),
-            v => Err(invalid(format!("Invalid module state: {v}"))),
-        }
-    }
 }
 
 const CAP_ZOOM: u8 = 1;
@@ -344,15 +299,10 @@ impl Request {
                     formats.push(spec);
                 }
                 let controls = read_control_caps(r)?;
-                let options = r.read_u8()?;
-                if options & !OPTION_KERNEL_MODULE != 0 {
-                    return Err(invalid(format!("Unknown enable options: {options:#x}")));
-                }
                 Ok(Self::Enable(EnableRequest {
                     maxburst,
                     formats,
                     controls,
-                    kernel_module: options & OPTION_KERNEL_MODULE != 0,
                 }))
             }
             3 => Ok(Self::Disable),
@@ -369,12 +319,7 @@ impl Request {
                 w.write_u8(e.maxburst)?;
                 write_count(w, e.formats.len())?;
                 e.formats.iter().try_for_each(|f| write_format_spec(w, f))?;
-                write_control_caps(w, &e.controls)?;
-                w.write_u8(if e.kernel_module {
-                    OPTION_KERNEL_MODULE
-                } else {
-                    0
-                })
+                write_control_caps(w, &e.controls)
             }
             Self::Disable => w.write_u8(3),
             Self::AttachSource => w.write_u8(4),
@@ -387,7 +332,6 @@ pub struct Status {
     /// Whether our function is on the gadget.
     pub enabled: bool,
     pub stream: StreamStatus,
-    pub kernel_module: ModuleState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -415,7 +359,6 @@ impl Response {
                 let fps = read_fps(r)?;
                 let source_fps = read_fps(r)?;
                 let failed = u64::from(r.read_u32::<LittleEndian>()?);
-                let kernel_module = ModuleState::from_wire(r.read_u8()?)?;
                 Ok(Self::Status(Status {
                     enabled,
                     stream: StreamStatus {
@@ -425,7 +368,6 @@ impl Response {
                         source_fps,
                         failed,
                     },
-                    kernel_module,
                 }))
             }
             2 => Ok(Self::Ok),
@@ -457,8 +399,7 @@ impl Response {
                 }
                 write_fps(w, s.stream.fps)?;
                 write_fps(w, s.stream.source_fps)?;
-                w.write_u32::<LittleEndian>(s.stream.failed.min(u32::MAX.into()) as u32)?;
-                w.write_u8(s.kernel_module.wire())
+                w.write_u32::<LittleEndian>(s.stream.failed.min(u32::MAX.into()) as u32)
             }
             Self::Ok => w.write_u8(2),
         }
@@ -477,8 +418,6 @@ pub enum SourceEvent {
     StreamStop { stream_id: u32 },
     /// The host changed a camera control.
     Control(Control),
-    /// Send an H.264 IDR frame next.
-    KeyFrame { stream_id: u32 },
 }
 
 impl SourceEvent {
@@ -498,9 +437,6 @@ impl SourceEvent {
                     .ok_or_else(|| invalid(format!("Unknown control: {id}")))?;
                 Ok(Self::Control(Control { id, value }))
             }
-            4 => Ok(Self::KeyFrame {
-                stream_id: r.read_u32::<LittleEndian>()?,
-            }),
             id => Err(invalid(format!("Unknown source event: {id}"))),
         }
     }
@@ -520,10 +456,6 @@ impl SourceEvent {
                 w.write_u8(3)?;
                 w.write_u8(id.wire())?;
                 w.write_i32::<LittleEndian>(*value)
-            }
-            Self::KeyFrame { stream_id } => {
-                w.write_u8(4)?;
-                w.write_u32::<LittleEndian>(*stream_id)
             }
         }
     }
@@ -608,20 +540,8 @@ mod tests {
                 white_balance: true,
                 power_line: true,
             },
-            kernel_module: false,
-        });
-        let h264 = Request::Enable(EnableRequest {
-            maxburst: 0,
-            formats: vec![
-                FormatSpec::default_for(FormatKind::Mjpeg),
-                FormatSpec::default_for(FormatKind::H264),
-                FormatSpec::default_for(FormatKind::Yuyv),
-            ],
-            controls: ControlCaps::default(),
-            kernel_module: true,
         });
         for r in [
-            h264,
             Request::GetStatus,
             enable,
             Request::Disable,
@@ -648,7 +568,6 @@ mod tests {
                 source_fps: 29.5,
                 failed: 3,
             },
-            kernel_module: ModuleState::Loaded,
         });
         for r in [Response::Error("nope".into()), status, Response::Ok] {
             assert_eq!(roundtrip_response(&r), r);
@@ -657,7 +576,6 @@ mod tests {
         let idle = Response::Status(Status {
             enabled: false,
             stream: StreamStatus::default(),
-            kernel_module: ModuleState::Unavailable,
         });
         assert_eq!(roundtrip_response(&idle), idle);
     }
@@ -677,16 +595,14 @@ mod tests {
                 white_balance: false,
                 power_line: true,
             },
-            kernel_module: true,
         });
         let mut buf = vec![];
         enable.write_to(&mut buf).unwrap();
-        // Formats, then control flags 1|2|8 and the zoom range 60..1000, then
-        // the kernel module option.
+        // Formats, then control flags 1|2|8 and the zoom range 60..1000.
         #[rustfmt::skip]
         assert_eq!(buf, [
             2, 2, 1, 0, 1, 0x80, 0x02, 0xe0, 0x01, 1, 0x15, 0x16, 0x05, 0x00,
-            0x0b, 60, 0, 0xe8, 0x03, 1,
+            0x0b, 60, 0, 0xe8, 0x03,
         ]);
 
         let status = Response::Status(Status {
@@ -704,7 +620,6 @@ mod tests {
                 source_fps: 29.5,
                 failed: 3,
             },
-            kernel_module: ModuleState::Available,
         });
         let mut buf = vec![];
         status.write_to(&mut buf).unwrap();
@@ -712,7 +627,7 @@ mod tests {
         assert_eq!(buf, [
             1, 1, 5, 1, 1, 0x80, 0x02, 0xe0, 0x01, 0x15, 0x16, 0x05, 0x00,
             0x00, 0x60, 0x09, 0x00, 0x06, 0x75, 0x00, 0x00, 0x3c, 0x73, 0x00, 0x00,
-            0x03, 0, 0, 0, 1,
+            0x03, 0, 0, 0,
         ]);
     }
 
@@ -735,7 +650,6 @@ mod tests {
                 id: ControlId::Brightness,
                 value: 200,
             }),
-            SourceEvent::KeyFrame { stream_id: 7 },
         ] {
             let mut buf = vec![];
             e.write_to(&mut buf).unwrap();
@@ -751,11 +665,6 @@ mod tests {
         .write_to(&mut buf)
         .unwrap();
         assert_eq!(buf, [3, 1, 200, 0, 0, 0]);
-        let mut buf = vec![];
-        SourceEvent::KeyFrame { stream_id: 7 }
-            .write_to(&mut buf)
-            .unwrap();
-        assert_eq!(buf, [4, 7, 0, 0, 0]);
 
         let frame = Frame {
             stream_id: 7,
@@ -790,12 +699,10 @@ mod tests {
             b.extend_from_slice(caps);
             Request::read_from(&mut b.as_slice())
         };
-        assert!(enable(&[0, 0]).is_ok());
-        assert!(enable(&[0x10, 0]).is_err(), "unknown flag");
-        assert!(enable(&[1, 0, 0, 0xe8, 3, 0]).is_err(), "zoom min 0");
-        assert!(enable(&[1, 0xe8, 3, 60, 0, 0]).is_err(), "zoom min > max");
-        assert!(enable(&[0, 2]).is_err(), "unknown option");
-        assert!(enable(&[0]).is_err(), "truncated options");
+        assert!(enable(&[0]).is_ok());
+        assert!(enable(&[0x10]).is_err(), "unknown flag");
+        assert!(enable(&[1, 0, 0, 0xe8, 3]).is_err(), "zoom min 0");
+        assert!(enable(&[1, 0xe8, 3, 60, 0]).is_err(), "zoom min > max");
     }
 
     #[test]
@@ -806,7 +713,6 @@ mod tests {
         assert!(parse(&[2, 16, 1]).is_err(), "maxburst > 15");
         assert!(parse(&[2, 0, 0]).is_err(), "no formats");
         assert!(parse(&[2, 0, 1, 7]).is_err(), "unknown kind");
-        assert!(parse(&[2, 0, 4]).is_err(), "too many formats");
         // 641x480: odd width.
         assert!(parse(&[2, 0, 1, 0, 1, 0x81, 2, 0xe0, 1, 1, 1, 0, 0, 0]).is_err());
         // Zero interval.

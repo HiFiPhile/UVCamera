@@ -90,13 +90,7 @@ class WebcamService : Service() {
     @Volatile
     private var sender: FrameSender? = null
 
-    /** Whether the current stream's frames depend on each other (H.264). */
-    @Volatile
-    private var ordered = false
-
-    private val sink = FrameSink { data, length, ptsUs, keyFrame ->
-        sender?.offer(streamId, data, length, ptsUs, ordered, keyFrame)
-    }
+    private val sink = FrameSink { data, length, ptsUs -> sender?.offer(streamId, data, length, ptsUs) }
     private val onCameraError: (String) -> Unit = { error -> _state.update { it.copy(error = error) } }
 
     /**
@@ -110,9 +104,6 @@ class WebcamService : Service() {
 
     /** Formats advertised to the host; changing them re-enumerates. */
     private var formats = emptyList<FormatSpec>()
-
-    /** Whether the daemon was enabled with the kernel module. */
-    private var kernelModule = false
 
     /** The host's current stream, to carry over to another camera. */
     private var stream: StreamParams? = null
@@ -190,8 +181,7 @@ class WebcamService : Service() {
         val controls = webcamControls(cameras)
         synchronized(lock) {
             camera = WebcamSettings.pickCamera(cameras, settings.cameraId)!!
-            kernelModule = settings.kernelModule
-            formats = webcamFormats(camera, settings.maxResolution.height, kernelModule)
+            formats = webcamFormats(camera, settings.maxResolution.height)
             transform = transformFor(camera, settings)
             streamer = CameraStreamer(manager, camera.id)
             Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
@@ -218,8 +208,7 @@ class WebcamService : Service() {
                 Client().use { client ->
                     // Re-enabling would re-enumerate the device on the host.
                     if (!client.getStatus().enabled) {
-                        val (f, k) = synchronized(lock) { formats to kernelModule }
-                        client.enable(f, controls, k)
+                        client.enable(synchronized(lock) { formats }, controls)
                     }
                 }
                 val client = Client()
@@ -258,16 +247,14 @@ class WebcamService : Service() {
     ) {
         if (stopping) return
         val next = WebcamSettings.pickCamera(cameras, settings.cameraId) ?: return
-        val nextKernelModule = settings.kernelModule
-        val nextFormats = webcamFormats(next, settings.maxResolution.height, nextKernelModule)
+        val nextFormats = webcamFormats(next, settings.maxResolution.height)
         val reenumerate = synchronized(lock) {
-            val reenumerate = nextFormats != formats || nextKernelModule != kernelModule
+            val reenumerate = nextFormats != formats
             if (next.id != camera.id || reenumerate) {
                 Log.i(TAG, "Switching to camera ${next.id}" + if (reenumerate) " with $nextFormats" else "")
                 streamer.releaseAndWait()
                 camera = next
                 formats = nextFormats
-                kernelModule = nextKernelModule
                 transform = transformFor(next, settings)
                 streamer = CameraStreamer(manager, next.id)
                 if (reenumerate) {
@@ -285,7 +272,7 @@ class WebcamService : Service() {
 
         if (reenumerate) {
             try {
-                Client().use { it.enable(nextFormats, controls, nextKernelModule) }
+                Client().use { it.enable(nextFormats, controls) }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to re-enable with new formats", e)
                 _state.update { it.copy(error = e.message ?: e.toString()) }
@@ -300,11 +287,7 @@ class WebcamService : Service() {
             channel.close()
             return
         }
-        sender = FrameSender(
-            channel,
-            onBacklog = { synchronized(lock) { streamer.requestKeyFrame() } },
-            onFailure = { channel.close() },
-        )
+        sender = FrameSender(channel) { channel.close() }
         _state.update { it.copy(error = null) }
 
         try {
@@ -313,7 +296,6 @@ class WebcamService : Service() {
                     is SourceEvent.StreamStart -> {
                         Log.i(TAG, "Host started stream ${event.streamId}: ${event.params}")
                         streamId = event.streamId
-                        ordered = !event.params.kind.isIntraOnly
                         _state.update { it.copy(streaming = event.params, error = null) }
                         synchronized(lock) {
                             stream = event.params
@@ -326,10 +308,6 @@ class WebcamService : Service() {
                             hostControls[event.control] = event.value
                             streamer.setControl(event.control, event.value)
                         }
-                    }
-                    is SourceEvent.KeyFrame -> {
-                        Log.i(TAG, "Daemon asked for a key frame")
-                        synchronized(lock) { streamer.requestKeyFrame() }
                     }
                     is SourceEvent.StreamStop -> {
                         Log.i(TAG, "Host stopped stream ${event.streamId}")

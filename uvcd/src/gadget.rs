@@ -18,7 +18,7 @@ use tracing::{debug, warn};
 use crate::uvc::{
     EntityIds,
     controls::ControlCaps,
-    format::{Format, FormatKind, FormatSpec, FormatTable, Frame},
+    format::{Format, FormatSpec, FormatTable, Frame},
 };
 
 /// Our function instance: `functions/<function>.<INSTANCE>`.
@@ -316,12 +316,7 @@ impl Gadget {
 
                 write_attr(&d.join("wWidth"), &frame.width.to_string())?;
                 write_attr(&d.join("wHeight"), &frame.height.to_string())?;
-                // Frame-based frames only have it in uvcx, where it sizes the
-                // V4L2 buffers; the descriptor has no such field.
-                let buffer_size = d.join("dwMaxVideoFrameBufferSize");
-                if spec.kind != FormatKind::H264 || buffer_size.exists() {
-                    write_attr(&buffer_size, &max_size.to_string())?;
-                }
+                write_attr(&d.join("dwMaxVideoFrameBufferSize"), &max_size.to_string())?;
                 write_attr(
                     &d.join("dwMaxBitRate"),
                     &bits(frame.intervals[0]).to_string(),
@@ -406,10 +401,8 @@ impl Gadget {
         }
         remove(&streaming_header, true)?;
 
-        for kind in FormatKind::ALL {
-            let format_dir = streaming
-                .join(kind.configfs_dir())
-                .join(kind.configfs_name());
+        for (dir, name) in [("mjpeg", "m"), ("uncompressed", "u")] {
+            let format_dir = streaming.join(dir).join(name);
             if let Ok(entries) = fs::read_dir(&format_dir) {
                 for entry in entries.flatten() {
                     if entry.file_type().is_ok_and(|t| t.is_dir()) {

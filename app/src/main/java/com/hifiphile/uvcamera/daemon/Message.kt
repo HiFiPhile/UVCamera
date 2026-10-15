@@ -8,10 +8,10 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
-// Daemon protocol, version 5. Mirrors uvcd/src/message.rs, which documents
+// Daemon protocol, version 4. Mirrors uvcd/src/message.rs, which documents
 // the wire format. All integers are little endian.
 
-const val PROTOCOL_VERSION = 5
+const val PROTOCOL_VERSION = 4
 
 /** Control ids, as uvcd's `ControlId::wire`. */
 object ControlIds {
@@ -60,13 +60,7 @@ const val SOCKET_NAME = "uvcamerad"
 
 enum class FormatKind(val wire: Int) {
     MJPEG(0),
-    YUYV(1),
-
-    /** Annex B access units, in decoding order. Needs the kernel module. */
-    H264(2);
-
-    /** Every frame stands alone: frames may be dropped or repeated. */
-    val isIntraOnly: Boolean get() = this != H264
+    YUYV(1);
 
     companion object {
         fun fromWire(value: Int) =
@@ -135,23 +129,7 @@ data class Status(
     val sourceFps: Double,
     /** Frames not fully transferred over the last statistics window. */
     val failed: Long,
-    val kernelModule: ModuleState = ModuleState.UNAVAILABLE,
 )
-
-/** Whether the daemon can use the usb_f_uvcx kernel module (H.264, bulk). */
-enum class ModuleState(val wire: Int) {
-    /** None built for this kernel. */
-    UNAVAILABLE(0),
-
-    /** One matches the kernel; it loads when enabled with it. */
-    AVAILABLE(1),
-    LOADED(2);
-
-    companion object {
-        fun fromWire(value: Int) =
-            entries.find { it.wire == value } ?: throw IOException("Invalid module state: $value")
-    }
-}
 
 sealed interface Request {
     fun write(out: Writer)
@@ -164,8 +142,6 @@ sealed interface Request {
         val maxburst: Int,
         val formats: List<FormatSpec>,
         val controls: ControlCaps = ControlCaps(),
-        /** Use the kernel module: bulk streaming, needed for H.264. */
-        val kernelModule: Boolean = false,
     ) : Request {
         override fun write(out: Writer) {
             out.u8(2)
@@ -182,7 +158,6 @@ sealed interface Request {
                 }
             }
             controls.write(out)
-            out.u8(if (kernelModule) 1 else 0)
         }
     }
 
@@ -211,8 +186,7 @@ sealed interface Response {
                 val fps = input.u32() / 1000.0
                 val sourceFps = input.u32() / 1000.0
                 val failed = input.u32()
-                val kernelModule = ModuleState.fromWire(input.u8())
-                StatusResponse(Status(enabled, speed, streaming, fps, sourceFps, failed, kernelModule))
+                StatusResponse(Status(enabled, speed, streaming, fps, sourceFps, failed))
             }
             2 -> Ok
             else -> throw IOException("Unknown response: $id")
@@ -231,15 +205,11 @@ sealed interface SourceEvent {
     /** The host changed camera control [control] (one of [ControlIds]) to [value]. */
     data class Control(val control: Int, val value: Int) : SourceEvent
 
-    /** Send an H.264 IDR frame next: the daemon had to drop frames. */
-    data class KeyFrame(val streamId: Int) : SourceEvent
-
     companion object {
         fun read(input: Reader): SourceEvent = when (val id = input.u8()) {
             1 -> StreamStart(input.u32().toInt(), input.streamParams())
             2 -> StreamStop(input.u32().toInt())
             3 -> Control(input.u8(), input.u32().toInt())
-            4 -> KeyFrame(input.u32().toInt())
             else -> throw IOException("Unknown source event: $id")
         }
     }

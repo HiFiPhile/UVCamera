@@ -10,7 +10,6 @@ mod doctor;
 mod gadget;
 mod gadget_cli;
 mod irq;
-mod kmod;
 mod message;
 mod pattern;
 mod sepatch;
