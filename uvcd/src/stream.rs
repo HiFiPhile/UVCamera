@@ -73,8 +73,9 @@ pub struct StreamStatus {
 /// Counters for one [`STATS_PERIOD`] window.
 #[derive(Default)]
 struct Stats {
-    /// Frames handed to the driver.
+    /// Frames handed to the driver, and their bytes.
     queued: u64,
+    queued_bytes: u64,
     /// Buffers the driver finished sending.
     completed: u64,
     /// Completed buffers the driver flagged as not fully transferred.
@@ -398,7 +399,7 @@ impl Streamer {
         let source_fps = s.fresh as f64 / elapsed.as_secs_f64();
         let ms = |d: Duration| d.as_secs_f64() * 1000.0;
         info!(
-            "Stats: sent {fps:.1} fps, app {source_fps:.1} fps, latency avg {:.1} ms / max {:.1} ms (daemon wait avg {:.1} ms), repeated {}, placeholder {}, invalid {}, failed {}, queued {}, starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
+            "Stats: sent {fps:.1} fps, app {source_fps:.1} fps, latency avg {:.1} ms / max {:.1} ms (daemon wait avg {:.1} ms), repeated {}, placeholder {}, invalid {}, failed {}, queued {} (avg {} KiB), starved {}, max gap {:.1} ms, produce avg {:.1} ms / max {:.1} ms",
             ms(s.latency_total) / s.fresh.max(1) as f64,
             ms(s.latency_max),
             ms(s.wait_total) / s.fresh.max(1) as f64,
@@ -407,6 +408,7 @@ impl Streamer {
             s.invalid,
             s.failed,
             s.queued,
+            s.queued_bytes / s.queued.max(1) / 1024,
             s.starved,
             ms(s.max_gap),
             ms(s.produce_total) / s.queued.max(1) as f64,
@@ -494,6 +496,7 @@ impl Streamer {
 
         let produce = now.elapsed();
         stream.stats.queued += 1;
+        stream.stats.queued_bytes += len as u64;
         stream.stats.produce_total += produce;
         stream.stats.produce_max = stream.stats.produce_max.max(produce);
 
