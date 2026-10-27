@@ -34,13 +34,6 @@ const STATS_PERIOD: Duration = Duration::from_secs(5);
 /// How long the last app frame is repeated when no new one arrives, before
 /// falling back to the placeholder pattern.
 const REPEAT_LIMIT: Duration = Duration::from_secs(1);
-/// How long after a fresh app frame to wait for the next one, in frame
-/// intervals, before repeating it. Fresh frames are sent as they arrive, so
-/// this only matters when the camera stalls or runs slower than the stream.
-/// Two intervals tolerates software-encoder jitter (frames up to ~60 ms
-/// apart at 30 fps); at 1.5 every late frame caused a repeat followed by
-/// the fresh frame, i.e. more frames per second than negotiated.
-const REPEAT_AFTER_INTERVALS: f64 = 2.0;
 /// Minimum spacing between queued frames, in frame intervals. Without it, a
 /// repeat followed by a late fresh frame sends two frames back to back and
 /// the host sees more frames per second than negotiated.
@@ -113,6 +106,82 @@ struct AppFrame {
     unsent: bool,
 }
 
+/// When to repeat the last app frame. Fresh frames are sent as they arrive;
+/// repeats fill in between. The app's frame period is estimated from
+/// arrivals: when it spans several stream intervals (a camera held to 30
+/// fps on a 60 fps stream), each frame is repeated on the stream's interval
+/// grid, so the host gets an even cadence at the negotiated rate. Past the
+/// expected next frame, one more interval of slack absorbs encoder jitter
+/// before a stall repeat: with only half an interval, every late frame
+/// caused a repeat followed by the fresh frame, i.e. more frames per second
+/// than negotiated.
+struct Pacer {
+    interval: Duration,
+    /// Average time between app frames, once two have arrived.
+    source_gap: Option<Duration>,
+    last_arrival: Option<Instant>,
+    /// When the last fresh frame was queued.
+    fresh_sent: Option<Instant>,
+    /// Repeats queued since then.
+    repeats: u32,
+}
+
+impl Pacer {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            source_gap: None,
+            last_arrival: None,
+            fresh_sent: None,
+            repeats: 0,
+        }
+    }
+
+    /// Note an app frame's arrival.
+    fn on_arrival(&mut self, at: Instant) {
+        if let Some(prev) = self.last_arrival {
+            // Stalls (camera switches) shouldn't dominate the average.
+            let gap = at.duration_since(prev).min(self.interval * 4);
+            self.source_gap = Some(match self.source_gap {
+                Some(avg) => (avg * 7 + gap) / 8,
+                None => gap,
+            });
+        }
+        self.last_arrival = Some(at);
+    }
+
+    /// Stream intervals per app frame, e.g. 2 for 30 fps on a 60 fps
+    /// stream; 1 when the app keeps up or runs only somewhat slower.
+    fn ratio(&self) -> u32 {
+        let gap = self.source_gap.unwrap_or(self.interval);
+        // A little slack so a camera at exactly half rate counts as 2.
+        (gap.as_secs_f64() / self.interval.as_secs_f64() + 0.1).floor().max(1.0) as u32
+    }
+
+    /// When the next repeat is due, after queuing a frame at `now`.
+    fn next_due(&mut self, now: Instant, fresh: bool) -> Instant {
+        if fresh {
+            self.fresh_sent = Some(now);
+            self.repeats = 0;
+        } else {
+            self.repeats += 1;
+        }
+        let base = self.fresh_sent.unwrap_or(now);
+        let ratio = self.ratio();
+        let slot = self.repeats + 1;
+        if slot < ratio {
+            // Within the app's frame period: the next grid slot.
+            base + self.interval * slot
+        } else if slot == ratio {
+            // The next fresh frame is due; allow an interval of slack.
+            base + self.interval * (ratio + 1)
+        } else {
+            // Stalled: repeat every interval.
+            now + self.interval
+        }
+    }
+}
+
 struct ActiveStream {
     params: StreamParams,
     /// Id announced to the frame source for this stream.
@@ -126,6 +195,7 @@ struct ActiveStream {
     next_due: Instant,
     /// When the last frame was queued.
     last_sent: Option<Instant>,
+    pacer: Pacer,
     sequence: u64,
     dropped: u64,
     started: Instant,
@@ -314,6 +384,7 @@ impl Streamer {
             free: (0..count).collect(),
             next_due: now,
             last_sent: None,
+            pacer: Pacer::new(Duration::from_nanos(u64::from(params.interval) * 100)),
             sequence: 0,
             dropped: 0,
             started: now,
@@ -431,6 +502,7 @@ impl Streamer {
         if let Some((frame, arrived)) = self.source.take(stream.stream_id) {
             if frame_is_valid(&stream.params, &frame.data) {
                 stream.stats.fresh += 1;
+                stream.pacer.on_arrival(arrived);
                 stream.last = Some(AppFrame {
                     data: frame.data,
                     arrived,
@@ -502,16 +574,11 @@ impl Streamer {
 
         stream.last_sent = Some(now);
         stream.sequence += 1;
-        if fresh {
-            // The camera sets the pace; only fill in if it falls behind.
-            stream.next_due = now + interval.mul_f64(REPEAT_AFTER_INTERVALS);
-        } else {
-            stream.next_due += interval;
-            // Don't try to catch up after a stall; resynchronize instead.
-            if stream.next_due + interval < now {
-                stream.dropped += 1;
-                stream.next_due = now + interval;
-            }
+        stream.next_due = stream.pacer.next_due(now, fresh);
+        // Don't try to catch up after a stall; resynchronize instead.
+        if stream.next_due + interval < now {
+            stream.dropped += 1;
+            stream.next_due = now + interval;
         }
 
         Ok(())
@@ -535,6 +602,83 @@ fn frame_is_valid(params: &StreamParams, data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Times (ms) at which frames are queued, given app frame arrival times
+    /// (ms), following feed_frame's rules: fresh frames at once (spaced by
+    /// MIN_GAP_INTERVALS), repeats when due.
+    fn simulate(interval_ms: u64, arrivals: &[u64], until_ms: u64) -> Vec<(u64, bool)> {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let interval = Duration::from_millis(interval_ms);
+        let mut pacer = Pacer::new(interval);
+        let mut next_due = at(0);
+        let mut last_sent: Option<Instant> = None;
+        let mut pending = false;
+        let mut have_frame = false;
+        let mut arrivals = arrivals.iter().peekable();
+        let mut sent = Vec::new();
+        for ms in 0..until_ms {
+            let now = at(ms);
+            if arrivals.peek().is_some_and(|&&a| a == ms) {
+                arrivals.next();
+                pacer.on_arrival(now);
+                pending = true;
+                have_frame = true;
+            }
+            if !have_frame || (!pending && now < next_due) {
+                continue;
+            }
+            if last_sent.is_some_and(|l| now < l + interval.mul_f64(MIN_GAP_INTERVALS)) {
+                continue;
+            }
+            next_due = pacer.next_due(now, pending);
+            sent.push((ms, pending));
+            pending = false;
+            last_sent = Some(now);
+        }
+        sent
+    }
+
+    #[test]
+    fn half_rate_app_frames_are_repeated_once_on_the_grid() {
+        // 30 fps app (33-34 ms apart, jittery) on a 60 fps (17 ms) stream.
+        let arrivals: Vec<u64> = (0..60).map(|i| i * 100 / 3 + [0, 4, 1, 3][i as usize % 4]).collect();
+        let sent = simulate(17, &arrivals, 2000);
+        let fresh = sent.iter().filter(|(_, f)| *f).count();
+        let repeats = sent.len() - fresh;
+        // After the rate estimate settles, one repeat per fresh frame.
+        let late: Vec<_> = sent.iter().filter(|(ms, _)| *ms > 500).collect();
+        let late_repeats = late.iter().filter(|(_, f)| !*f).count();
+        assert_eq!(fresh, 60);
+        assert!(repeats >= 50, "{repeats} repeats");
+        assert!(late_repeats * 2 >= late.len() - 1, "{late:?}");
+        // Then never more than the negotiated rate over any 100 ms.
+        for w in late.windows(7) {
+            assert!(w[6].0 - w[0].0 >= 90, "{w:?}");
+        }
+        // Repeats land midway between fresh frames.
+        for w in late.windows(2).filter(|w| w[0].1 && !w[1].1) {
+            assert!((14..=20).contains(&(w[1].0 - w[0].0)), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn full_rate_app_frames_are_not_repeated() {
+        // 58.5 fps app with jitter on a 60 fps stream.
+        let arrivals: Vec<u64> = (0..100).map(|i| i * 1000 / 58 + [0, 3, 1][i as usize % 3]).collect();
+        let sent = simulate(17, &arrivals, 1700);
+        assert!(sent.iter().all(|(_, fresh)| *fresh), "{sent:?}");
+    }
+
+    #[test]
+    fn stalls_repeat_every_interval() {
+        let arrivals: Vec<u64> = (0..10).map(|i| i * 33).collect();
+        let sent = simulate(33, &arrivals, 600);
+        // Last fresh frame at 297 ms; repeats from 2 intervals later.
+        let repeats: Vec<u64> = sent.iter().filter(|(_, f)| !*f).map(|(ms, _)| *ms).collect();
+        assert_eq!(repeats.first(), Some(&363));
+        assert!(repeats.windows(2).all(|w| w[1] - w[0] == 33), "{repeats:?}");
+    }
 
     #[test]
     fn validates_app_frames() {

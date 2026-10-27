@@ -328,7 +328,11 @@ Done so far:
       from 2560×1920 (60 fps, ~15 ms per frame, nothing out of order). The
       front camera has no size that covers it at 60 fps, so such a plan
       falls back to capturing at 30 fps (`CapturePlan.fps`) instead of
-      failing; the host gets repeated frames.
+      failing. The daemon estimates the app's frame period and, when it
+      spans several stream intervals, repeats each frame on the stream's
+      grid (`Pacer`): front camera rotated at 1080p60 sends 58.4 fps with
+      29 fresh and 29 repeated per second, where the old "repeat after two
+      late intervals" rule gave ~41 fps with uneven gaps.
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.
