@@ -304,10 +304,17 @@ Done so far:
       cargo-deny) and a tag-triggered release workflow that verifies the
       module against the committed certificate pin (docs/RELEASE.md).
       Rehearsed with a throwaway key on a tagged clone.
-- [x] 60 fps setting for cameras whose AE reaches 60 fps, MJPEG up to 720p
-      only: 1080p60 MJPEG needs more than the isochronous link carries at
-      the minimum burst (~24 MB/s); the daemon sent ~32 fps of 60 over
-      USB 2.0. Software JPEG uses four workers above 30 fps.
+- [x] 60 fps setting for cameras whose AE reaches 60 fps. Software JPEG
+      uses four workers above 30 fps. 1080p60 over USB 2.0 (OnePlus 15
+      front camera): 58.5 fps, all the camera delivers, 0 failed, ~84 ms
+      capture to USB; rotated 180°, 52–57 new frames per second (frames
+      finishing out of order are dropped). A first test sent only ~32 fps
+      of 60; not reproduced.
+- [x] Software JPEG from YUV for every stream; the camera's JPEG encoder is
+      only a fallback. Its output was visibly noisier with the same
+      reported noise reduction and edge modes (FAST), likely missing the
+      YUV stream's temporal filtering, and ~60% larger.
+      `NOISE_REDUCTION_MODE_HIGH_QUALITY` on it cut the camera to 6.4 fps.
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.

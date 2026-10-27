@@ -17,14 +17,7 @@ private val MJPEG_SIZES = listOf(Resolution(1920, 1080), Resolution(1280, 720), 
 private val MJPEG_FPS = listOf(30, 15)
 private val MJPEG_FAST_FPS = listOf(60, 30, 15)
 
-/**
- * Isochronous bandwidth (~24 MB/s at the minimum burst) carries 1080p MJPEG
- * at only ~30 fps, so 60 fps stops at 720p.
- */
-private const val MJPEG_FAST_MAX_HEIGHT = 720
-
-private fun fastMjpegSizes(camera: CameraInfo) =
-    camera.fastSizes.values.flatten().filter { it.height <= MJPEG_FAST_MAX_HEIGHT }.toSet()
+private fun fastMjpegSizes(camera: CameraInfo) = camera.fastSizes.values.flatten().toSet()
 
 private fun frame(size: Resolution, fps: List<Int>) =
     FrameSpec(size.width, size.height, fps.map(::fpsToInterval).sorted())

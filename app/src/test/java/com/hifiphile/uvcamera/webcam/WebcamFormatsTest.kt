@@ -109,16 +109,11 @@ class WebcamFormatsTest {
 
         val mjpeg = webcamFormats(oneplus, fps60 = true)[0]
         assertEquals(
-            // 1080p stays at 30: USB can't carry it at 60.
-            listOf(listOf(333_333, 666_666), listOf(166_666, 333_333, 666_666), listOf(333_333, 666_666)),
+            listOf(listOf(166_666, 333_333, 666_666), listOf(166_666, 333_333, 666_666), listOf(333_333, 666_666)),
             mjpeg.frames.map { it.intervals },
         )
         // Off: 30 fps everywhere.
         assertEquals(webcamFormats(camera(jpeg = sizes, yuv = sizes)), webcamFormats(oneplus, fps60 = false))
-
-        // 60 fps at 1080p only isn't enough to offer the setting.
-        val only1080 = oneplus.copy(fastSizes = mapOf(StreamFormat.YUV to listOf(Resolution(1920, 1080))))
-        assertEquals(false, supports60Fps(only1080))
 
         // The Nothing Phone (2): no 60 fps auto exposure range, so no fast sizes.
         assertEquals(false, supports60Fps(camera(jpeg = sizes, yuv = sizes)))

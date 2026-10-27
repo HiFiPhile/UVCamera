@@ -70,9 +70,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         private const val RELEASE_TIMEOUT_MS = 2000L
 
         /**
-         * How to produce [params] with [transform]. The camera's JPEG encoder
-         * can't rotate or mirror, so any transform goes through YUV, captured
-         * large enough that the transformed image covers the output.
+         * How to produce [params] with [transform]: software JPEG from YUV,
+         * captured large enough that the transformed image covers the
+         * output. The camera's JPEG encoder is only a fallback for cameras
+         * without a usable YUV size: its output is noisier (the YUV stream
+         * gets more noise filtering) and it can't rotate or mirror.
          *
          * @throws IllegalArgumentException if no capture size works
          */
@@ -84,6 +86,13 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
             fun fastEnough(format: Int, size: Size) =
                 map.getOutputMinFrameDuration(format, size) in 1..maxDuration
 
+            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
+                .filter { fastEnough(ImageFormat.YUV_420_888, it) }
+                .map { it.width to it.height }
+            chooseCaptureSize(yuvSizes, params.width, params.height, transform)?.let { (w, h) ->
+                return CapturePlan(EncodeMode.YUV_JPEG, w, h)
+            }
+
             val out = Size(params.width, params.height)
             if (transform.isIdentity &&
                 map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
@@ -91,15 +100,9 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
             ) {
                 return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height)
             }
-
-            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
-                .filter { fastEnough(ImageFormat.YUV_420_888, it) }
-                .map { it.width to it.height }
-            val (w, h) = chooseCaptureSize(yuvSizes, params.width, params.height, transform)
-                ?: throw IllegalArgumentException(
-                    "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
-                        "with this camera")
-            return CapturePlan(EncodeMode.YUV_JPEG, w, h)
+            throw IllegalArgumentException(
+                "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
+                    "with this camera")
         }
 
         /**
@@ -265,7 +268,9 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 (gains?.let { " gains=%.2f/%.2f/%.2f".format(it.red, it.greenEven, it.blue) } ?: "") +
                 " af=$af" + (focus?.let { " focus=%.2f".format(it) } ?: "") +
                 " zoom=${result.get(CaptureResult.CONTROL_ZOOM_RATIO)}" +
-                " antibanding=${result.get(CaptureResult.CONTROL_AE_ANTIBANDING_MODE)}"
+                " antibanding=${result.get(CaptureResult.CONTROL_AE_ANTIBANDING_MODE)}" +
+                " nr=${result.get(CaptureResult.NOISE_REDUCTION_MODE)}" +
+                " edge=${result.get(CaptureResult.EDGE_MODE)}"
             if (summary != last) {
                 last = summary
                 Log.i(TAG, "Applied: $summary")
