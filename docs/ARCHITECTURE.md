@@ -231,11 +231,17 @@ gadget from init scripts and has no gadget HAL.
 UVC descriptors are fixed at enumeration, so the advertised formats must be
 decided **before** the UDC is bound. Changing them means a re-enumeration,
 which drops ADB for about a second. The app derives the `FormatSpec` from the
-selected camera's streamable sizes (≥ 30 fps), clipped to bandwidth:
+cameras' streamable sizes (≥ 30 fps), clipped to bandwidth:
 
 | Format | Default frames | Bandwidth (USB 2.0 HS isoc, ~24 MB/s theoretical) |
 |---|---|---|
-| MJPEG | 1920×1080, 1280×720, 640×480 @ 30/15 fps; 60 fps where the camera can | 1080p60 ≈ 12–17 MB/s (200–280 KiB frames), fits |
+| MJPEG | 1920×1080, 1280×720, 640×480 @ 30/15 fps; 60 fps where any camera can | 1080p60 ≈ 12–17 MB/s (200–280 KiB frames), fits |
+
+The formats are the union over all cameras, so switching cameras never
+re-enumerates. A camera that can't fill a size (or a rotation of it) streams
+the largest image it has, centered with black around it; one held to 30 fps
+captures at 30 and the daemon repeats each frame on the stream's interval
+grid. Below 75% coverage at 60 fps, a 30 fps capture that covers more wins.
 
 The app doesn't offer YUYV: uncompressed 640×480@30 is 18.4 MB/s, at the
 limit, and higher sizes don't fit. uvcd still supports it for

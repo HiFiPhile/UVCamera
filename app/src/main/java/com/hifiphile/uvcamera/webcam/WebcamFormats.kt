@@ -17,31 +17,27 @@ private val MJPEG_SIZES = listOf(Resolution(1920, 1080), Resolution(1280, 720), 
 private val MJPEG_FPS = listOf(30, 15)
 private val MJPEG_FAST_FPS = listOf(60, 30, 15)
 
-private fun fastMjpegSizes(camera: CameraInfo) = camera.fastSizes.values.flatten().toSet()
-
 private fun frame(size: Resolution, fps: List<Int>) =
     FrameSpec(size.width, size.height, fps.map(::fpsToInterval).sorted())
 
-/** Whether [camera] can stream any MJPEG size at 60 fps. */
-fun supports60Fps(camera: CameraInfo): Boolean {
-    val fast = fastMjpegSizes(camera)
-    return MJPEG_SIZES.any { it in fast }
-}
-
 /**
- * Formats to advertise for [camera]: MJPEG at the standard webcam sizes up
- * to [maxHeight] that it can deliver at 30 fps, as hardware JPEG or as YUV
- * for software encoding. No YUYV: isochronous bandwidth limits it to 480p30. With [fps60], MJPEG sizes up to 720p that the camera
- * delivers at 60 fps offer 60 fps too, as the default. Falls back to the daemon's defaults if
- * the camera reports nothing usable.
+ * Formats to advertise for [cameras]: MJPEG at the standard webcam sizes up
+ * to [maxHeight] that any of them delivers at 30 fps, as hardware JPEG or as
+ * YUV for software encoding, with 60 fps where any delivers 60. They don't
+ * depend on the selected camera, so switching cameras needs no
+ * re-enumeration: a camera without a size streams the largest it has with
+ * black around it, and one held to 30 fps has its frames repeated. No YUYV:
+ * isochronous bandwidth limits it to 480p30. Falls back to the daemon's
+ * defaults if no camera reports anything usable.
  */
-fun webcamFormats(camera: CameraInfo, maxHeight: Int = Int.MAX_VALUE, fps60: Boolean = false): List<FormatSpec> {
-    val yuv = camera.streamableSizes[StreamFormat.YUV].orEmpty().toSet()
-    val jpeg = camera.streamableSizes[StreamFormat.JPEG].orEmpty().toSet()
-    val fast = if (fps60) fastMjpegSizes(camera) else emptySet()
+fun webcamFormats(cameras: List<CameraInfo>, maxHeight: Int = Int.MAX_VALUE): List<FormatSpec> {
+    val sizes = cameras.flatMap { c ->
+        c.streamableSizes[StreamFormat.YUV].orEmpty() + c.streamableSizes[StreamFormat.JPEG].orEmpty()
+    }.toSet()
+    val fast = cameras.flatMap { it.fastSizes.values.flatten() }.toSet()
 
     val mjpeg = MJPEG_SIZES
-        .filter { it.height <= maxHeight && (it in yuv || it in jpeg) }
+        .filter { it.height <= maxHeight && it in sizes }
         .map { frame(it, if (it in fast) MJPEG_FAST_FPS else MJPEG_FPS) }
     return if (mjpeg.isNotEmpty()) listOf(FormatSpec(FormatKind.MJPEG, mjpeg)) else FormatSpec.defaults()
 }

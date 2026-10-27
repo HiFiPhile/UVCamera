@@ -76,24 +76,32 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         /**
          * How to produce [params] with [transform]: software JPEG from YUV,
          * captured large enough that the transformed image covers the
-         * output. The camera's JPEG encoder is only a fallback for cameras
-         * without a usable YUV size: its output is noisier (the YUV stream
-         * gets more noise filtering) and it can't rotate or mirror.
+         * output, or as close as the camera gets, with black around it. The
+         * camera's JPEG encoder is only a fallback for cameras without a
+         * usable YUV size: its output is noisier (the YUV stream gets more
+         * noise filtering) and it can't rotate or mirror.
          *
-         * Above 30 fps, a camera may lack a size that covers a quarter turn
-         * (the OnePlus 15 front camera at 1080p60); it then captures at 30
-         * fps and the daemon repeats frames.
+         * The camera runs at the stream's rate when its auto exposure can,
+         * else at 30 fps and the daemon repeats frames. 30 fps is also used
+         * when the stream's rate covers less than [MIN_COVERAGE] of the
+         * output and 30 fps covers more.
          *
-         * @throws IllegalArgumentException if no capture size works
+         * @throws IllegalArgumentException if the camera has no usable size
          */
         fun plan(chars: CameraCharacteristics, params: StreamParams, transform: Transform): CapturePlan {
             require(params.kind == FormatKind.MJPEG) { "Only MJPEG is supported" }
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalArgumentException("Camera has no stream configurations")
+            val aeMax = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.maxOfOrNull { it.upper } ?: 30
             val fps = Math.round(params.fps).toInt()
-            val rates = listOf(fps to params.interval) +
-                if (fps > 30) listOf(30 to fpsToInterval(30)) else emptyList()
+            val rates = buildList {
+                if (fps <= maxOf(aeMax, 30)) add(fps to params.interval)
+                if (fps > 30) add(30 to fpsToInterval(30))
+            }
 
+            var best: CapturePlan? = null
+            var bestCoverage = 0.0
             for ((rate, interval) in rates) {
                 val maxDuration = maxFrameDurationNs(interval)
                 fun fastEnough(format: Int, size: Size) =
@@ -102,21 +110,41 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
                     .filter { fastEnough(ImageFormat.YUV_420_888, it) }
                     .map { it.width to it.height }
-                chooseCaptureSize(yuvSizes, params.width, params.height, transform)?.let { (w, h) ->
-                    return CapturePlan(EncodeMode.YUV_JPEG, w, h, rate)
+                val choice = chooseCaptureSize(yuvSizes, params.width, params.height, transform)
+                if (choice == null) {
+                    val out = Size(params.width, params.height)
+                    if (transform.isIdentity &&
+                        map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
+                        fastEnough(ImageFormat.JPEG, out)
+                    ) {
+                        return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height, rate)
+                    }
+                    continue
                 }
-
-                val out = Size(params.width, params.height)
-                if (transform.isIdentity &&
-                    map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
-                    fastEnough(ImageFormat.JPEG, out)
-                ) {
-                    return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height, rate)
+                val (w, h) = choice
+                val coverage = coverage(w, h, params.width, params.height, transform)
+                if (best == null || coverage > bestCoverage) {
+                    best = CapturePlan(EncodeMode.YUV_JPEG, w, h, rate)
+                    bestCoverage = coverage
+                }
+                if (coverage >= MIN_COVERAGE) {
+                    break
                 }
             }
-            throw IllegalArgumentException(
-                "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
-                    "with this camera")
+            return best ?: throw IllegalArgumentException(
+                "No capture size for ${params.width}x${params.height} at ${params.fps} fps")
+        }
+
+        /**
+         * Below this fraction of the output covered by the camera image, a
+         * slower frame rate that covers more is used instead of black bars.
+         */
+        private const val MIN_COVERAGE = 0.75
+
+        /** Fraction of the output that a [w]x[h] capture covers after [transform]. */
+        fun coverage(w: Int, h: Int, outWidth: Int, outHeight: Int, transform: Transform): Double {
+            val (rw, rh) = transform.rotatedSize(w, h)
+            return minOf(rw, outWidth).toDouble() * minOf(rh, outHeight) / (outWidth.toDouble() * outHeight)
         }
 
         /**
@@ -127,10 +155,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
         fun maxFrameDurationNs(interval: Int): Long = interval * 100L + 99
 
         /**
-         * The smallest capture size whose transformed image covers the output:
-         * the output size itself for 0°/180° when available, and for 90°/270°
-         * one whose short side covers the output width (the center band of
-         * the rotated image is used, at full resolution).
+         * The smallest capture size whose transformed image covers the most
+         * of the output: one that covers all of it if any does (the output
+         * size itself for 0°/180° when available, and for 90°/270° one whose
+         * short side covers the output width; the center band of the rotated
+         * image is used, at full resolution).
          */
         fun chooseCaptureSize(
             sizes: List<Pair<Int, Int>>,
@@ -138,11 +167,11 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
             outHeight: Int,
             transform: Transform,
         ): Pair<Int, Int>? = sizes
-            .filter { (w, h) ->
-                val (rw, rh) = transform.rotatedSize(w, h)
-                rw >= outWidth && rh >= outHeight
-            }
-            .minByOrNull { (w, h) -> w.toLong() * h }
+            .filter { (w, h) -> w % 2 == 0 && h % 2 == 0 }
+            .minWithOrNull(
+                compareByDescending<Pair<Int, Int>> { (w, h) -> coverage(w, h, outWidth, outHeight, transform) }
+                    .thenBy { (w, h) -> w.toLong() * h },
+            )
 
         /**
          * Map UVC brightness (0..255, 128 = no change) onto the camera's AE

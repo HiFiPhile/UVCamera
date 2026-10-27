@@ -181,7 +181,7 @@ class WebcamService : Service() {
         val controls = webcamControls(cameras)
         synchronized(lock) {
             camera = WebcamSettings.pickCamera(cameras, settings.cameraId)!!
-            formats = webcamFormats(camera, settings.maxResolution.height, settings.fps60)
+            formats = webcamFormats(cameras, settings.maxResolution.height)
             transform = transformFor(camera, settings)
             streamer = CameraStreamer(manager, camera.id)
             Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
@@ -233,9 +233,9 @@ class WebcamService : Service() {
     }
 
     /**
-     * Follow the user's camera and resolution choice. Another camera with
-     * the same formats takes over the host's stream directly; different
-     * formats re-enumerate the device with them.
+     * Follow the user's camera and resolution choice. Another camera takes
+     * over the host's stream directly (formats are the same for every
+     * camera); a new resolution cap re-enumerates the device.
      */
     private fun switchSource(
         manager: CameraManager,
@@ -245,7 +245,7 @@ class WebcamService : Service() {
     ) {
         if (stopping) return
         val next = WebcamSettings.pickCamera(cameras, settings.cameraId) ?: return
-        val nextFormats = webcamFormats(next, settings.maxResolution.height, settings.fps60)
+        val nextFormats = webcamFormats(cameras, settings.maxResolution.height)
         val reenumerate = synchronized(lock) {
             val reenumerate = nextFormats != formats
             if (next.id != camera.id || reenumerate) {

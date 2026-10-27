@@ -26,10 +26,10 @@ class WebcamFormatsTest {
     @Test
     fun onePlus15BackCamera() {
         // JPEG only from 1080p up, YUV at every standard size.
-        val formats = webcamFormats(camera(
+        val formats = webcamFormats(listOf(camera(
             jpeg = listOf(Resolution(3840, 2160), Resolution(1920, 1080)),
             yuv = listOf(Resolution(1920, 1080), Resolution(1280, 720), Resolution(640, 480)),
-        ))
+        )))
 
         assertEquals(listOf(FormatKind.MJPEG), formats.map { it.kind })
         assertEquals(
@@ -42,15 +42,18 @@ class WebcamFormatsTest {
     @Test
     fun maxResolutionCapsSizes() {
         val formats = webcamFormats(
-            camera(
+            listOf(camera(
                 jpeg = listOf(Resolution(1920, 1080)),
                 yuv = listOf(Resolution(1920, 1080), Resolution(1280, 720), Resolution(640, 480)),
-            ),
+            )),
             maxHeight = 720,
         )
         assertEquals(listOf(1280 to 720, 640 to 480), formats[0].frames.map { it.width to it.height })
 
-        val vga = webcamFormats(camera(jpeg = emptyList(), yuv = listOf(Resolution(1280, 720), Resolution(640, 480))), maxHeight = 480)
+        val vga = webcamFormats(
+            listOf(camera(jpeg = emptyList(), yuv = listOf(Resolution(1280, 720), Resolution(640, 480)))),
+            maxHeight = 480,
+        )
         assertEquals(listOf(listOf(640 to 480)), vga.map { f -> f.frames.map { it.width to it.height } })
     }
 
@@ -90,37 +93,40 @@ class WebcamFormatsTest {
 
     @Test
     fun cameraWithoutYuvOnlyGetsHardwareJpegSizes() {
-        val formats = webcamFormats(camera(jpeg = listOf(Resolution(1280, 720)), yuv = emptyList()))
+        val formats = webcamFormats(listOf(camera(jpeg = listOf(Resolution(1280, 720)), yuv = emptyList())))
         assertEquals(1, formats.size)
         assertEquals(listOf(1280 to 720), formats[0].frames.map { it.width to it.height })
     }
 
     @Test
-    fun sixtyFpsWhereTheCameraCan() {
+    fun formatsAreTheUnionOfAllCameras() {
         val sizes = listOf(Resolution(1920, 1080), Resolution(1280, 720), Resolution(640, 480))
         // OnePlus 15 back camera: JPEG and YUV at 1080p60, YUV at 720p60; not 480p.
-        val oneplus = camera(jpeg = sizes, yuv = sizes).copy(
+        val back = camera(jpeg = sizes, yuv = sizes).copy(
             fastSizes = mapOf(
                 StreamFormat.JPEG to listOf(Resolution(1920, 1080)),
                 StreamFormat.YUV to listOf(Resolution(1920, 1080), Resolution(1280, 720)),
             ),
         )
-        assertEquals(true, supports60Fps(oneplus))
+        // A 30 fps camera that only reaches 720p.
+        val small = camera(jpeg = emptyList(), yuv = sizes.drop(1)).copy(id = "2")
 
-        val mjpeg = webcamFormats(oneplus, fps60 = true)[0]
+        val formats = webcamFormats(listOf(small, back))
         assertEquals(
             listOf(listOf(166_666, 333_333, 666_666), listOf(166_666, 333_333, 666_666), listOf(333_333, 666_666)),
-            mjpeg.frames.map { it.intervals },
+            formats[0].frames.map { it.intervals },
         )
-        // Off: 30 fps everywhere.
-        assertEquals(webcamFormats(camera(jpeg = sizes, yuv = sizes)), webcamFormats(oneplus, fps60 = false))
-
-        // The Nothing Phone (2): no 60 fps auto exposure range, so no fast sizes.
-        assertEquals(false, supports60Fps(camera(jpeg = sizes, yuv = sizes)))
+        // The same whichever camera is selected, so switching never re-enumerates.
+        assertEquals(formats, webcamFormats(listOf(back, small)))
+        // Without a 60 fps camera (the Nothing Phone (2)), 30 fps only.
+        assertEquals(
+            listOf(listOf(333_333, 666_666), listOf(333_333, 666_666)),
+            webcamFormats(listOf(small)).single().frames.map { it.intervals },
+        )
     }
 
     @Test
     fun nothingUsableFallsBackToDefaults() {
-        assertEquals(FormatSpec.defaults(), webcamFormats(camera(emptyList(), emptyList())))
+        assertEquals(FormatSpec.defaults(), webcamFormats(listOf(camera(emptyList(), emptyList()))))
     }
 }

@@ -37,9 +37,10 @@ class YuvTransformTest {
     private val uPlane = Plane(uv, cStride, 2)
     private val vPlane = Plane(uv.copyOfRange(1, uv.size), cStride, 2)
 
-    /** Reference: transform a w x h matrix given by [value]. */
+    /** Reference: transform a w x h matrix given by [value]; [black] outside it. */
     private fun reference(
         w: Int, h: Int, t: Transform, ow: Int, oh: Int, cropX: Int, cropY: Int,
+        black: Int,
         value: (Int, Int) -> Int,
     ): Array<IntArray> {
         // Rotate clockwise by building the rotated matrix explicitly.
@@ -51,28 +52,32 @@ class YuvTransformTest {
         }
         if (t.mirrorH) m = Array(m.size) { y -> m[y].reversedArray() }
         if (t.mirrorV) m = m.reversedArray()
-        return Array(oh) { y -> IntArray(ow) { x -> m[y + cropY][x + cropX] } }
+        return Array(oh) { y ->
+            IntArray(ow) { x -> m.getOrNull(y + cropY)?.getOrNull(x + cropX) ?: black }
+        }
     }
 
     private fun check(t: Transform, ow: Int, oh: Int) {
         val (rw, rh) = t.rotatedSize(sw, sh)
-        val cx = (rw - ow) / 2 and 1.inv()
-        val cy = (rh - oh) / 2 and 1.inv()
-        val ry = reference(sw, sh, t, ow, oh, cx, cy, ::yValue)
-        val ru = reference(sw / 2, sh / 2, t, ow / 2, oh / 2, cx / 2, cy / 2, ::uValue)
-        val rv = reference(sw / 2, sh / 2, t, ow / 2, oh / 2, cx / 2, cy / 2, ::vValue)
+        val cx = Math.floorDiv(rw - ow, 2) and 1.inv()
+        val cy = Math.floorDiv(rh - oh, 2) and 1.inv()
+        val ry = reference(sw, sh, t, ow, oh, cx, cy, 0, ::yValue)
+        val ru = reference(sw / 2, sh / 2, t, ow / 2, oh / 2, cx / 2, cy / 2, 128, ::uValue)
+        val rv = reference(sw / 2, sh / 2, t, ow / 2, oh / 2, cx / 2, cy / 2, 128, ::vValue)
 
         val xf = YuvTransform(sw, sh, ow, oh, t)
 
         // Apply the walks as JpegEncoder's native code does, into I420.
         val (yw, cw) = xf.walks(yPlane, uPlane)
+        fun sample(p: Plane, w: YuvTransform.RowWalk, x: Int, y: Int, black: Int): Byte {
+            val i = x - w.firsts[y]
+            return if (i in 0 until w.counts[y]) p.data[w.starts[y] + i * w.steps[y]] else black.toByte()
+        }
         val i420 = ByteArray(ow * oh * 3 / 2)
         var o = 0
-        for (y in 0 until oh) for (x in 0 until ow) i420[o++] = yPlane.data[yw.starts[y] + x * yw.steps[y]]
+        for (y in 0 until oh) for (x in 0 until ow) i420[o++] = sample(yPlane, yw, x, y, 0)
         for (plane in listOf(uPlane, vPlane)) {
-            for (y in 0 until oh / 2) for (x in 0 until ow / 2) {
-                i420[o++] = plane.data[cw.starts[y] + x * cw.steps[y]]
-            }
+            for (y in 0 until oh / 2) for (x in 0 until ow / 2) i420[o++] = sample(plane, cw, x, y, 128)
         }
         val expected = ByteArray(i420.size).also { e ->
             var i = 0
@@ -100,9 +105,18 @@ class YuvTransformTest {
     }
 
     @Test
-    fun sourceTooSmallIsRejected() {
+    fun everyRotationAndMirrorWithBlackAround() {
+        // 10x6 is wider than the 8x12 rotation; 16x10 is larger both ways
+        // than the source; 14x6 pads one way and crops the other.
+        for (rotation in Rotation.entries) for (h in listOf(false, true)) for (v in listOf(false, true)) {
+            for ((ow, oh) in listOf(10 to 6, 16 to 10, 14 to 6)) check(Transform(rotation, h, v), ow, oh)
+        }
+    }
+
+    @Test
+    fun oddSizesAreRejected() {
         assertThrows(IllegalArgumentException::class.java) {
-            YuvTransform(sw, sh, 10, 6, Transform(Rotation.R90))
+            YuvTransform(sw, sh, 9, 6, Transform())
         }
     }
 

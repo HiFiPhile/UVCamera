@@ -23,13 +23,10 @@
     <string name="webcam_settings_camera">Camera</string>
     <string name="webcam_settings_max_resolution">Maximum resolution (reconnects USB)</string>
     <string name="webcam_settings_title">Settings</string>
-    <string name="webcam_settings_frame_rate">Frame rate (reconnects USB)</string>
-    <string name="webcam_fps_chip">%1$d fps</string>
     <string name="webcam_settings_orientation">Orientation</string>
     <string name="webcam_rotation_chip">%1$d°</string>
     <string name="webcam_mirror_h">Mirror ↔</string>
     <string name="webcam_mirror_v">Mirror ↕</string>
-    <string name="webcam_settings_orientation_note">Rotation and mirroring use the software encoder, which may cause video glitches.</string>
     <string name="webcam_camera_chip">%1$s (%2$s)</string>
     <string name="webcam_enable">Turn on</string>
     <string name="webcam_disable">Turn off</string>

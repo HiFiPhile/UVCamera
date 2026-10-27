@@ -333,6 +333,13 @@ Done so far:
       grid (`Pacer`): front camera rotated at 1080p60 sends 58.4 fps with
       29 fresh and 29 repeated per second, where the old "repeat after two
       late intervals" rule gave ~41 fps with uneven gaps.
+- [x] Fewer settings: no frame rate setting. Formats are the union over all
+      cameras (60 fps where any camera can), so switching cameras never
+      re-enumerates; a camera that can't fill the output gets black around
+      its largest image (the front camera rotated at 1080p60: 3280×1856,
+      1856 of 1920 columns, 58.5 fps, ~90 ms), one held to 30 fps gets
+      repeated frames. The orientation note went too: every stream uses the
+      software encoder now.
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.

@@ -3,8 +3,9 @@
 
 // Transforms a camera YUV_420_888 frame into planar 4:2:0 and compresses it
 // with libjpeg-turbo. The transform is given as row walks computed by
-// YuvTransform: for each output row, the index of its first sample and the
-// index step per pixel. Each thread keeps its own compressor and buffers.
+// YuvTransform: for each output row, the columns that show the source (the
+// rest is black), the index of the first one's sample and the index step
+// per pixel. Each thread keeps its own compressor and buffers.
 
 #include <jni.h>
 #include <pthread.h>
@@ -77,11 +78,29 @@ static struct state *state_get(int width, int height, int quality) {
     return s;
 }
 
-/** Whether every sample [rows] walks of [count] pixels read lies in [0, len). */
-static int walks_in_bounds(const jint *starts, const jint *steps, int rows, int count, jsize len) {
+/** A plane's row walks; see the top of the file. */
+struct walk {
+    const jint *starts;
+    const jint *steps;
+    const jint *firsts;
+    const jint *counts;
+};
+
+/**
+ * Whether each of [rows] walks stays within an output row of [width] and
+ * reads only samples in [0, len).
+ */
+static int walks_in_bounds(const struct walk *w, int rows, int width, jsize len) {
     for (int r = 0; r < rows; r++) {
-        int64_t first = starts[r];
-        int64_t last = first + (int64_t)steps[r] * (count - 1);
+        int count = w->counts[r];
+        if (count == 0) {
+            continue;
+        }
+        if (count < 0 || w->firsts[r] < 0 || w->firsts[r] > width - count) {
+            return 0;
+        }
+        int64_t first = w->starts[r];
+        int64_t last = first + (int64_t)w->steps[r] * (count - 1);
         if (first < 0 || last < 0 || first >= len || last >= len) {
             return 0;
         }
@@ -89,28 +108,41 @@ static int walks_in_bounds(const jint *starts, const jint *steps, int rows, int 
     return 1;
 }
 
+/** Fill the parts of an output row of [width] outside its walk with [black]. */
+static void pad_row(uint8_t *out, int width, int first, int count, uint8_t black) {
+    if (count < width) {
+        memset(out, black, first);
+        memset(out + first + count, black, width - first - count);
+    }
+}
+
 // Rows walked together when they step across source rows (90° and 270°),
 // so each source cache line serves the whole block instead of one sample.
 #define BLOCK 16
 
-/** Whether rows [r, r + n) have the same step. */
-static int is_block(const jint *steps, int r, int n) {
+/** Whether rows [r, r + n) cover the same columns with the same step. */
+static int is_block(const struct walk *w, int r, int n) {
     for (int k = 1; k < n; k++) {
-        if (steps[r + k] != steps[r]) {
+        if (w->steps[r + k] != w->steps[r] || w->firsts[r + k] != w->firsts[r] ||
+            w->counts[r + k] != w->counts[r]) {
             return 0;
         }
     }
     return 1;
 }
 
-static void walk_luma(uint8_t *out, const uint8_t *src, const jint *starts, const jint *steps,
-                      int width, int height) {
+static void walk_luma(uint8_t *out, const uint8_t *src, const struct walk *w, int width, int height) {
     for (int r = 0; r < height;) {
-        int step = steps[r];
-        if (step != 1 && step != -1 && r + BLOCK <= height && is_block(steps, r, BLOCK)) {
-            for (int c = 0; c < width; c++) {
+        int step = w->steps[r];
+        int first = w->firsts[r];
+        int count = w->counts[r];
+        if (step != 1 && step != -1 && r + BLOCK <= height && is_block(w, r, BLOCK)) {
+            for (int k = 0; k < BLOCK; k++) {
+                pad_row(out + (size_t)(r + k) * width, width, first, count, 0);
+            }
+            for (int c = 0; c < count; c++) {
                 for (int k = 0; k < BLOCK; k++) {
-                    out[(size_t)(r + k) * width + c] = src[starts[r + k] + (ptrdiff_t)c * step];
+                    out[(size_t)(r + k) * width + first + c] = src[w->starts[r + k] + (ptrdiff_t)c * step];
                 }
             }
             r += BLOCK;
@@ -118,15 +150,17 @@ static void walk_luma(uint8_t *out, const uint8_t *src, const jint *starts, cons
         }
 
         uint8_t *o = out + (size_t)r * width;
-        const uint8_t *p = src + starts[r];
+        pad_row(o, width, first, count, 0);
+        o += first;
+        const uint8_t *p = src + w->starts[r];
         if (step == 1) {
-            memcpy(o, p, width);
+            memcpy(o, p, count);
         } else if (step == -1) {
-            for (int c = 0; c < width; c++) {
+            for (int c = 0; c < count; c++) {
                 o[c] = p[-c];
             }
         } else {
-            for (int c = 0; c < width; c++, p += step) {
+            for (int c = 0; c < count; c++, p += step) {
                 o[c] = *p;
             }
         }
@@ -135,15 +169,21 @@ static void walk_luma(uint8_t *out, const uint8_t *src, const jint *starts, cons
 }
 
 static void walk_chroma(uint8_t *out_u, uint8_t *out_v, const uint8_t *u, const uint8_t *v,
-                        const jint *starts, const jint *steps, int width, int height) {
+                        const struct walk *w, int width, int height) {
     for (int r = 0; r < height;) {
-        int step = steps[r];
-        int n = r + BLOCK <= height && is_block(steps, r, BLOCK) ? BLOCK : 1;
-        for (int c = 0; c < width; c++) {
+        int step = w->steps[r];
+        int first = w->firsts[r];
+        int count = w->counts[r];
+        int n = r + BLOCK <= height && is_block(w, r, BLOCK) ? BLOCK : 1;
+        for (int k = 0; k < n; k++) {
+            pad_row(out_u + (size_t)(r + k) * width, width, first, count, 128);
+            pad_row(out_v + (size_t)(r + k) * width, width, first, count, 128);
+        }
+        for (int c = 0; c < count; c++) {
             for (int k = 0; k < n; k++) {
-                ptrdiff_t i = starts[r + k] + (ptrdiff_t)c * step;
-                out_u[(size_t)(r + k) * width + c] = u[i];
-                out_v[(size_t)(r + k) * width + c] = v[i];
+                ptrdiff_t i = w->starts[r + k] + (ptrdiff_t)c * step;
+                out_u[(size_t)(r + k) * width + first + c] = u[i];
+                out_v[(size_t)(r + k) * width + first + c] = v[i];
             }
         }
         r += n;
@@ -157,12 +197,32 @@ static void throw_ise(JNIEnv *env, const char *message) {
     }
 }
 
+/** Pins the four arrays of a walk; see release_walk. */
+static int get_walk(JNIEnv *env, jintArray arrays[4], struct walk *w) {
+    const jint **fields[4] = { &w->starts, &w->steps, &w->firsts, &w->counts };
+    int ok = 1;
+    for (int i = 0; i < 4; i++) {
+        *fields[i] = (*env)->GetPrimitiveArrayCritical(env, arrays[i], NULL);
+        ok = ok && *fields[i];
+    }
+    return ok;
+}
+
+static void release_walk(JNIEnv *env, jintArray arrays[4], struct walk *w) {
+    const jint *fields[4] = { w->starts, w->steps, w->firsts, w->counts };
+    for (int i = 3; i >= 0; i--) {
+        if (fields[i]) {
+            (*env)->ReleasePrimitiveArrayCritical(env, arrays[i], (void *)fields[i], JNI_ABORT);
+        }
+    }
+}
+
 JNIEXPORT jbyteArray JNICALL
 Java_com_hifiphile_uvcamera_camera_JpegEncoder_nativeEncode(
     JNIEnv *env, jclass clazz, jint width, jint height, jint quality,
     jbyteArray y_array, jbyteArray u_array, jbyteArray v_array,
-    jintArray y_starts_array, jintArray y_steps_array,
-    jintArray c_starts_array, jintArray c_steps_array) {
+    jintArray y_starts, jintArray y_steps, jintArray y_firsts, jintArray y_counts,
+    jintArray c_starts, jintArray c_steps, jintArray c_firsts, jintArray c_counts) {
     (void)clazz;
 
     struct state *s = state_get(width, height, quality);
@@ -171,38 +231,37 @@ Java_com_hifiphile_uvcamera_camera_JpegEncoder_nativeEncode(
         return NULL;
     }
 
+    jintArray y_arrays[4] = { y_starts, y_steps, y_firsts, y_counts };
+    jintArray c_arrays[4] = { c_starts, c_steps, c_firsts, c_counts };
+    for (int i = 0; i < 4; i++) {
+        if ((*env)->GetArrayLength(env, y_arrays[i]) < height ||
+            (*env)->GetArrayLength(env, c_arrays[i]) < height / 2) {
+            throw_ise(env, "Row walks too short");
+            return NULL;
+        }
+    }
     jsize y_len = (*env)->GetArrayLength(env, y_array);
     jsize u_len = (*env)->GetArrayLength(env, u_array);
     jsize v_len = (*env)->GetArrayLength(env, v_array);
-    if ((*env)->GetArrayLength(env, y_starts_array) < height ||
-        (*env)->GetArrayLength(env, y_steps_array) < height ||
-        (*env)->GetArrayLength(env, c_starts_array) < height / 2 ||
-        (*env)->GetArrayLength(env, c_steps_array) < height / 2) {
-        throw_ise(env, "Row walks too short");
-        return NULL;
-    }
 
     // No other JNI calls until these are released.
+    struct walk yw = { 0 }, cw = { 0 };
     uint8_t *y = (*env)->GetPrimitiveArrayCritical(env, y_array, NULL);
     uint8_t *u = (*env)->GetPrimitiveArrayCritical(env, u_array, NULL);
     uint8_t *v = (*env)->GetPrimitiveArrayCritical(env, v_array, NULL);
-    jint *y_starts = (*env)->GetPrimitiveArrayCritical(env, y_starts_array, NULL);
-    jint *y_steps = (*env)->GetPrimitiveArrayCritical(env, y_steps_array, NULL);
-    jint *c_starts = (*env)->GetPrimitiveArrayCritical(env, c_starts_array, NULL);
-    jint *c_steps = (*env)->GetPrimitiveArrayCritical(env, c_steps_array, NULL);
+    int ok = get_walk(env, y_arrays, &yw);
+    ok = get_walk(env, c_arrays, &cw) && ok;
 
-    int ok = y && u && v && y_starts && y_steps && c_starts && c_steps &&
-        walks_in_bounds(y_starts, y_steps, height, width, y_len) &&
-        walks_in_bounds(c_starts, c_steps, height / 2, width / 2, u_len < v_len ? u_len : v_len);
+    ok = ok && y && u && v &&
+        walks_in_bounds(&yw, height, width, y_len) &&
+        walks_in_bounds(&cw, height / 2, width / 2, u_len < v_len ? u_len : v_len);
     if (ok) {
-        walk_luma(s->planes[0], y, y_starts, y_steps, width, height);
-        walk_chroma(s->planes[1], s->planes[2], u, v, c_starts, c_steps, width / 2, height / 2);
+        walk_luma(s->planes[0], y, &yw, width, height);
+        walk_chroma(s->planes[1], s->planes[2], u, v, &cw, width / 2, height / 2);
     }
 
-    if (c_steps) (*env)->ReleasePrimitiveArrayCritical(env, c_steps_array, c_steps, JNI_ABORT);
-    if (c_starts) (*env)->ReleasePrimitiveArrayCritical(env, c_starts_array, c_starts, JNI_ABORT);
-    if (y_steps) (*env)->ReleasePrimitiveArrayCritical(env, y_steps_array, y_steps, JNI_ABORT);
-    if (y_starts) (*env)->ReleasePrimitiveArrayCritical(env, y_starts_array, y_starts, JNI_ABORT);
+    release_walk(env, c_arrays, &cw);
+    release_walk(env, y_arrays, &yw);
     if (v) (*env)->ReleasePrimitiveArrayCritical(env, v_array, v, JNI_ABORT);
     if (u) (*env)->ReleasePrimitiveArrayCritical(env, u_array, u, JNI_ABORT);
     if (y) (*env)->ReleasePrimitiveArrayCritical(env, y_array, y, JNI_ABORT);

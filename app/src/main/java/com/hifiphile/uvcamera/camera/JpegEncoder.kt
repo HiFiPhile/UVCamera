@@ -5,7 +5,8 @@ package com.hifiphile.uvcamera.camera
 
 /**
  * Software JPEG with libjpeg-turbo (4:2:0), transforming the camera planes
- * on the way in native code. Each calling thread keeps its own compressor.
+ * on the way in native code, with black where the source doesn't reach.
+ * Each calling thread keeps its own compressor.
  */
 object JpegEncoder {
     init {
@@ -16,7 +17,7 @@ object JpegEncoder {
     fun encode(xf: YuvTransform, y: Plane, u: Plane, v: Plane, quality: Int): ByteArray {
         val (yw, cw) = xf.walks(y, u)
         return nativeEncode(xf.outWidth, xf.outHeight, quality, y.data, u.data, v.data,
-            yw.starts, yw.steps, cw.starts, cw.steps)
+            yw.starts, yw.steps, yw.firsts, yw.counts, cw.starts, cw.steps, cw.firsts, cw.counts)
     }
 
     @JvmStatic
@@ -29,7 +30,11 @@ object JpegEncoder {
         v: ByteArray,
         yStarts: IntArray,
         ySteps: IntArray,
+        yFirsts: IntArray,
+        yCounts: IntArray,
         cStarts: IntArray,
         cSteps: IntArray,
+        cFirsts: IntArray,
+        cCounts: IntArray,
     ): ByteArray
 }

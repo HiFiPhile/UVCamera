@@ -70,14 +70,16 @@ object EncodeBench {
         val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
         val (yw, cw) = xf.walks(y, u)
         val sums = DoubleArray(3)
-        fun at(p: Plane, walk: YuvTransform.RowWalk, x: Int, row: Int) =
-            p.data[walk.starts[row] + x * walk.steps[row]].toInt() and 0xff
+        fun at(p: Plane, walk: YuvTransform.RowWalk, x: Int, row: Int, black: Int): Int {
+            val i = x - walk.firsts[row]
+            return if (i in 0 until walk.counts[row]) p.data[walk.starts[row] + i * walk.steps[row]].toInt() and 0xff else black
+        }
         for (row in 0 until H) for (x in 0 until W) {
             val c = bitmap.getPixel(x, row)
             val (r, g, b) = Triple(Color.red(c), Color.green(c), Color.blue(c))
-            sums[0] += kotlin.math.abs(0.299 * r + 0.587 * g + 0.114 * b - at(y, yw, x, row))
-            sums[1] += kotlin.math.abs(128 - 0.168736 * r - 0.331264 * g + 0.5 * b - at(u, cw, x / 2, row / 2))
-            sums[2] += kotlin.math.abs(128 + 0.5 * r - 0.418688 * g - 0.081312 * b - at(v, cw, x / 2, row / 2))
+            sums[0] += kotlin.math.abs(0.299 * r + 0.587 * g + 0.114 * b - at(y, yw, x, row, 0))
+            sums[1] += kotlin.math.abs(128 - 0.168736 * r - 0.331264 * g + 0.5 * b - at(u, cw, x / 2, row / 2, 128))
+            sums[2] += kotlin.math.abs(128 + 0.5 * r - 0.418688 * g - 0.081312 * b - at(v, cw, x / 2, row / 2, 128))
         }
         return DoubleArray(3) { sums[it] / (W * H) }
     }
@@ -89,6 +91,8 @@ object EncodeBench {
             Triple(Rotation.R0, W, H),
             Triple(Rotation.R180, W, H),
             Triple(Rotation.R90, 2560, 1920),
+            // The OnePlus 15 front camera at 60 fps: black bars either side.
+            Triple(Rotation.R90, 3280, 1856),
         )) {
             val (y, u, v) = planes(sw, sh)
             val xf = YuvTransform(sw, sh, W, H, Transform(r))

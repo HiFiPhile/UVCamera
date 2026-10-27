@@ -43,8 +43,8 @@ data class Transform(
 
 /**
  * Maps output pixels to source pixels for one source size, output size and
- * [Transform], and converts YUV 4:2:0 planes accordingly. The source,
- * rotated, must be at least as large as the output; the center is cropped.
+ * [Transform]. The rotated source is centered on the output: cropped where
+ * it is larger, and surrounded by black where it is smaller.
  *
  * Each output row is a straight line through the source (a row, a column,
  * or either reversed), so the inner loops only add a fixed step to an index.
@@ -56,19 +56,17 @@ class YuvTransform(
     val outHeight: Int,
     val transform: Transform,
 ) {
-    // Crop offsets in the rotated image, even so chroma stays aligned.
+    // Offsets of the output in the rotated image, even so chroma stays
+    // aligned: positive crops, negative pads.
     private val cropX: Int
     private val cropY: Int
 
     init {
         require(outWidth % 2 == 0 && outHeight % 2 == 0) { "Output size must be even" }
+        require(srcWidth % 2 == 0 && srcHeight % 2 == 0) { "Source size must be even" }
         val (rw, rh) = transform.rotatedSize(srcWidth, srcHeight)
-        require(rw >= outWidth && rh >= outHeight) {
-            "Source ${srcWidth}x$srcHeight rotated ${transform.rotation.degrees}° " +
-                "doesn't cover ${outWidth}x$outHeight"
-        }
-        cropX = (rw - outWidth) / 2 and 1.inv()
-        cropY = (rh - outHeight) / 2 and 1.inv()
+        cropX = Math.floorDiv(rw - outWidth, 2) and 1.inv()
+        cropY = Math.floorDiv(rh - outHeight, 2) and 1.inv()
     }
 
     /**
@@ -94,25 +92,38 @@ class YuvTransform(
     }
 
     /**
-     * For each output row of a plane: the index of its first sample and the
-     * index step per output pixel, given the plane's strides.
+     * For each output row of a plane: the output columns that show the
+     * source, [firsts] to [firsts] + [counts] (the rest is black), the index
+     * of the first one's sample, and the index step per output pixel, given
+     * the plane's strides.
      */
-    class RowWalk(val starts: IntArray, val steps: IntArray)
+    class RowWalk(val starts: IntArray, val steps: IntArray, val firsts: IntArray, val counts: IntArray)
 
     private fun walk(w: Int, h: Int, ow: Int, oh: Int, cx: Int, cy: Int, rowStride: Int, pixelStride: Int): RowWalk {
+        val (rw, rh) = transform.rotatedSize(w, h)
         val starts = IntArray(oh)
         val steps = IntArray(oh)
+        val firsts = IntArray(oh)
+        val counts = IntArray(oh)
+        // Columns of the output inside the rotated image.
+        val x0 = maxOf(0, -cx)
+        val x1 = minOf(ow, rw - cx)
         for (y in 0 until oh) {
-            val a = source(0, y, w, h, cx, cy)
-            val b = source(if (ow > 1) 1 else 0, y, w, h, cx, cy)
+            if (y + cy !in 0 until rh || x1 <= x0) {
+                continue
+            }
+            val a = source(x0, y, w, h, cx, cy)
+            val b = source(if (x1 - x0 > 1) x0 + 1 else x0, y, w, h, cx, cy)
             val ax = (a shr 32).toInt()
             val ay = a.toInt()
             val bx = (b shr 32).toInt()
             val by = b.toInt()
             starts[y] = ay * rowStride + ax * pixelStride
             steps[y] = (by - ay) * rowStride + (bx - ax) * pixelStride
+            firsts[y] = x0
+            counts[y] = x1 - x0
         }
-        return RowWalk(starts, steps)
+        return RowWalk(starts, steps, firsts, counts)
     }
 
     // Walks are cached per plane layout; strides are fixed for a camera stream.
