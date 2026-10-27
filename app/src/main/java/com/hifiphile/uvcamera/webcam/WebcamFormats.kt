@@ -21,6 +21,17 @@ private fun frame(size: Resolution, fps: List<Int>) =
     FrameSpec(size.width, size.height, fps.map(::fpsToInterval).sorted())
 
 /**
+ * What [camera] gives each standard webcam size: its frame rate, or null
+ * when the camera has no such size and streams a smaller one with black
+ * around it (upright; rotations may need larger captures).
+ */
+fun webcamModes(camera: CameraInfo): List<Pair<Resolution, Int?>> {
+    val sizes = camera.streamableSizes.values.flatten().toSet()
+    val fast = camera.fastSizes.values.flatten().toSet()
+    return MJPEG_SIZES.map { it to if (it in fast) 60 else if (it in sizes) 30 else null }
+}
+
+/**
  * Formats to advertise for [cameras]: MJPEG at the standard webcam sizes
  * that any of them delivers at 30 fps, as hardware JPEG or as
  * YUV for software encoding, with 60 fps where any delivers 60. They don't

@@ -343,6 +343,12 @@ Done so far:
 - [x] No maximum resolution setting either: the host picks the size, and
       the formats only change with the app (an update), never with a
       setting. Left: camera choice and orientation.
+- [x] Device page camera cards in the style of Device Info HW: what the
+      webcam gets per size (1080p60, or black bars), megapixels, optical
+      format, sensor size and pixel pitch, focal length, aperture and 35 mm
+      equivalent, 16:9 field of view, focus, ISO and shutter range, zoom,
+      features (OIS, flash, RAW, manual sensor, 10-bit, high-speed video),
+      the physical cameras behind a logical one, and the hardware level.
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.

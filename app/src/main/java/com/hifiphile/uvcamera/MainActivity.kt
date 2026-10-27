@@ -4,6 +4,7 @@
 package com.hifiphile.uvcamera
 
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.os.Build
 import android.os.Bundle
 import androidx.annotation.DrawableRes
@@ -47,8 +48,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.hifiphile.uvcamera.camera.CameraDetails
 import com.hifiphile.uvcamera.camera.CameraInfo
 import com.hifiphile.uvcamera.camera.Facing
+import com.hifiphile.uvcamera.camera.formatExposure
 import com.hifiphile.uvcamera.camera.queryCameras
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -56,6 +59,7 @@ import com.hifiphile.uvcamera.webcam.DaemonState
 import com.hifiphile.uvcamera.webcam.WebcamSettingsCard
 import com.hifiphile.uvcamera.webcam.WebcamStatusCard
 import com.hifiphile.uvcamera.webcam.WebcamViewModel
+import com.hifiphile.uvcamera.webcam.webcamModes
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -237,34 +241,109 @@ private fun CameraCard(camera: CameraInfo) {
         Facing.FRONT -> R.string.camera_facing_front
         Facing.EXTERNAL -> R.string.camera_facing_external
     })
+    val d = camera.details
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
                 stringResource(R.string.camera_title, camera.id, facing),
                 style = MaterialTheme.typography.titleMedium,
             )
-            Text(
-                stringResource(R.string.camera_hardware_level, camera.hardwareLevel),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            for ((format, sizes) in camera.streamableSizes) {
-                Text(
-                    if (sizes.isEmpty()) {
-                        stringResource(R.string.camera_format_none, format.label)
+            InfoRow(
+                stringResource(R.string.camera_webcam),
+                webcamModes(camera).map { (size, fps) ->
+                    if (fps != null) {
+                        stringResource(R.string.camera_webcam_mode, size.height, fps)
                     } else {
-                        stringResource(
-                            R.string.camera_format_sizes,
-                            format.label,
-                            sizes.joinToString(", "),
-                        )
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
+                        stringResource(R.string.camera_webcam_padded, size.height)
+                    }
+                }.joinToString(" · "),
+            )
+            val mp = d.megapixels
+            val array = d.activeArray
+            if (mp != null && array != null) {
+                InfoRow(
+                    stringResource(R.string.camera_resolution),
+                    d.maxMegapixels?.let { stringResource(R.string.camera_megapixels_full, mp, array.toString(), it) }
+                        ?: stringResource(R.string.camera_megapixels, mp, array.toString()),
                 )
             }
+            val size = d.physicalSizeMm
+            val format = d.opticalFormat
+            val pixel = d.pixelSizeUm
+            if (size != null && format != null && pixel != null) {
+                InfoRow(
+                    stringResource(R.string.camera_sensor),
+                    stringResource(R.string.camera_sensor_value, format, size.first, size.second, pixel),
+                )
+            }
+            val focal = d.focalLengthMm
+            if (focal != null) {
+                val aperture = d.apertures.minOrNull()
+                val equivalent = d.equivalentFocalLengthMm
+                InfoRow(
+                    stringResource(R.string.camera_lens),
+                    listOfNotNull(
+                        stringResource(R.string.camera_focal_length, focal),
+                        aperture?.let { stringResource(R.string.camera_aperture, it) },
+                        equivalent?.let { stringResource(R.string.camera_equivalent, it) },
+                    ).joinToString(" "),
+                )
+            }
+            d.fieldOfView(16, 9)?.let { (h, v) ->
+                InfoRow(stringResource(R.string.camera_view), stringResource(R.string.camera_view_value, h, v))
+            }
+            InfoRow(
+                stringResource(R.string.camera_focus),
+                d.minFocusCm?.takeIf { d.autofocus }
+                    ?.let { stringResource(R.string.camera_focus_auto, it) }
+                    ?: stringResource(R.string.camera_focus_fixed),
+            )
+            val iso = d.isoRange
+            val exposure = d.exposureRangeNs
+            if (iso != null && exposure != null) {
+                InfoRow(
+                    stringResource(R.string.camera_exposure),
+                    stringResource(
+                        R.string.camera_exposure_value,
+                        iso.first,
+                        iso.second,
+                        formatExposure(exposure.first),
+                        formatExposure(exposure.second),
+                    ),
+                )
+            }
+            camera.zoomRatioRange?.takeIf { (lo, hi) -> hi > lo }?.let { (lo, hi) ->
+                InfoRow(stringResource(R.string.camera_zoom), stringResource(R.string.camera_zoom_value, lo, hi))
+            }
+            val features = cameraFeatures(d)
+            if (features.isNotEmpty()) {
+                InfoRow(stringResource(R.string.camera_features), features.map { stringResource(it) }.joinToString(", "))
+            }
+            if (d.physicalIds.isNotEmpty()) {
+                InfoRow(stringResource(R.string.camera_combines), d.physicalIds.joinToString(", "))
+            }
+            InfoRow(stringResource(R.string.camera_level), camera.hardwareLevel)
         }
+    }
+}
+
+/** Notable hardware and Camera2 features, as string resources. */
+private fun cameraFeatures(d: CameraDetails): List<Int> = buildList {
+    if (d.ois) add(R.string.camera_feature_ois)
+    if (d.flash) add(R.string.camera_feature_flash)
+    val caps = mapOf(
+        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW to R.string.camera_feature_raw,
+        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR to R.string.camera_feature_manual,
+        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_DYNAMIC_RANGE_TEN_BIT to R.string.camera_feature_ten_bit,
+        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO to R.string.camera_feature_high_speed,
+        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT to R.string.camera_feature_depth,
+        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MONOCHROME to R.string.camera_feature_monochrome,
+    )
+    for ((cap, label) in caps) {
+        if (cap in d.capabilities) add(label)
     }
 }

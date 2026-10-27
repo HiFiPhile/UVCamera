@@ -53,6 +53,8 @@ data class CameraInfo(
      * ([colorTemperatureRange]) or from its [colorCalibration].
      */
     val manualWhiteBalance: Boolean = false,
+    /** Sensor and lens facts, for display. */
+    val details: CameraDetails = CameraDetails(),
 )
 
 /** 30 fps, the baseline frame rate every advertised UVC frame size must meet. */
@@ -122,6 +124,7 @@ fun queryCameras(manager: CameraManager): List<CameraInfo> = manager.cameraIdLis
         antibandingModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)
             ?.toList().orEmpty(),
         manualWhiteBalance = colorTemperatureRange(chars) != null || colorCalibration(chars) != null,
+        details = cameraDetails(chars),
     )
 }
 
