@@ -23,7 +23,7 @@
     <string name="webcam_settings_camera">Camera</string>
     <string name="webcam_settings_max_resolution">Maximum resolution (reconnects USB)</string>
     <string name="webcam_settings_title">Settings</string>
-    <string name="webcam_settings_frame_rate">Frame rate (reconnects USB)</string>
+    <string name="webcam_settings_frame_rate">Frame rate (reconnects USB, 60 fps up to 720p)</string>
     <string name="webcam_fps_chip">%1$d fps</string>
     <string name="webcam_settings_orientation">Orientation</string>
     <string name="webcam_rotation_chip">%1$d°</string>

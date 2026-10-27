@@ -17,6 +17,15 @@ private val MJPEG_SIZES = listOf(Resolution(1920, 1080), Resolution(1280, 720), 
 private val MJPEG_FPS = listOf(30, 15)
 private val MJPEG_FAST_FPS = listOf(60, 30, 15)
 
+/**
+ * Isochronous bandwidth (~24 MB/s at the minimum burst) carries 1080p MJPEG
+ * at only ~30 fps, so 60 fps stops at 720p.
+ */
+private const val MJPEG_FAST_MAX_HEIGHT = 720
+
+private fun fastMjpegSizes(camera: CameraInfo) =
+    camera.fastSizes.values.flatten().filter { it.height <= MJPEG_FAST_MAX_HEIGHT }.toSet()
+
 /** YUYV is limited by USB 2.0 isochronous bandwidth (~24 MB/s). */
 private val YUYV_FRAMES = listOf(Resolution(640, 480) to listOf(30, 15), Resolution(1280, 720) to listOf(10))
 
@@ -25,21 +34,21 @@ private fun frame(size: Resolution, fps: List<Int>) =
 
 /** Whether [camera] can stream any MJPEG size at 60 fps. */
 fun supports60Fps(camera: CameraInfo): Boolean {
-    val fast = camera.fastSizes.values.flatten().toSet()
+    val fast = fastMjpegSizes(camera)
     return MJPEG_SIZES.any { it in fast }
 }
 
 /**
  * Formats to advertise for [camera]: the standard webcam sizes up to
  * [maxHeight] that it can deliver at 30 fps, as hardware JPEG or as YUV for
- * software encoding. With [fps60], MJPEG sizes the camera delivers at 60 fps
- * offer 60 fps too, as the default. Falls back to the daemon's defaults if
+ * software encoding. With [fps60], MJPEG sizes up to 720p that the camera
+ * delivers at 60 fps offer 60 fps too, as the default. Falls back to the daemon's defaults if
  * the camera reports nothing usable.
  */
 fun webcamFormats(camera: CameraInfo, maxHeight: Int = Int.MAX_VALUE, fps60: Boolean = false): List<FormatSpec> {
     val yuv = camera.streamableSizes[StreamFormat.YUV].orEmpty().toSet()
     val jpeg = camera.streamableSizes[StreamFormat.JPEG].orEmpty().toSet()
-    val fast = if (fps60) camera.fastSizes.values.flatten().toSet() else emptySet()
+    val fast = if (fps60) fastMjpegSizes(camera) else emptySet()
 
     val mjpeg = MJPEG_SIZES
         .filter { it.height <= maxHeight && (it in yuv || it in jpeg) }
