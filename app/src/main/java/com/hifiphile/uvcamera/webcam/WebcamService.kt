@@ -205,12 +205,10 @@ class WebcamService : Service() {
 
         while (!stopping) {
             try {
-                Client().use { client ->
-                    // Re-enabling would re-enumerate the device on the host.
-                    if (!client.getStatus().enabled) {
-                        client.enable(synchronized(lock) { formats }, controls)
-                    }
-                }
+                // The daemon keeps a session already enabled with the same
+                // formats, so the host only sees a replug if they changed
+                // (e.g. after an app update).
+                Client().use { it.enable(synchronized(lock) { formats }, controls) }
                 val client = Client()
                 val channel = try {
                     client.attachSource()

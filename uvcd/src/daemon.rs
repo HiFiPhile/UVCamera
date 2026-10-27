@@ -139,10 +139,16 @@ fn drop_privileges(extra: CapabilitySet) -> Result<()> {
     Ok(())
 }
 
+/// A running session and the request that started it.
+struct Active {
+    session: Session,
+    request: EnableRequest,
+}
+
 struct Daemon {
     gadget: Gadget,
     auth: Authenticator,
-    session: Mutex<Option<Session>>,
+    session: Mutex<Option<Active>>,
     /// Outlives sessions, so the app's source connection survives
     /// disable/enable cycles.
     source: Arc<SourceHub>,
@@ -151,9 +157,9 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn stop_session(session: &mut Option<Session>) -> Result<()> {
+    fn stop_session(session: &mut Option<Active>) -> Result<()> {
         match session.take() {
-            Some(s) => s.stop(),
+            Some(a) => a.session.stop(),
             None => Ok(()),
         }
     }
@@ -161,7 +167,7 @@ impl Daemon {
     fn status(&self) -> Status {
         let mut session = self.session.lock().unwrap();
         // A session whose stream thread died has already failed; clean up.
-        if session.as_ref().is_some_and(Session::is_finished) {
+        if session.as_ref().is_some_and(|a| a.session.is_finished()) {
             warn!("Stream thread exited; disabling");
             if let Err(e) = Self::stop_session(&mut session) {
                 warn!("{e:?}");
@@ -169,9 +175,9 @@ impl Daemon {
         }
 
         match &*session {
-            Some(s) => Status {
+            Some(a) => Status {
                 enabled: true,
-                stream: s.status(),
+                stream: a.session.status(),
             },
             None => Status {
                 enabled: false,
@@ -180,15 +186,25 @@ impl Daemon {
         }
     }
 
+    /// Start a session for `request`. A running session started with the
+    /// same request is kept, so clients can enable unconditionally without
+    /// the host seeing a replug.
     fn enable(&self, request: &EnableRequest) -> Result<()> {
         let mut session = self.session.lock().unwrap();
+        if session
+            .as_ref()
+            .is_some_and(|a| a.request == *request && !a.session.is_finished())
+        {
+            info!("Already enabled with these formats");
+            return Ok(());
+        }
         if let Err(e) = Self::stop_session(&mut session) {
             warn!("Previous session failed: {e:?}");
         }
 
         // Control values belong to a session (and its camera).
         self.source.reset_controls();
-        *session = Some(Session::start(
+        let started = Session::start(
             self.gadget.clone(),
             SessionConfig {
                 specs: request.formats.clone(),
@@ -202,7 +218,11 @@ impl Daemon {
                 irq_boost: true,
             },
             self.source.clone(),
-        )?);
+        )?;
+        *session = Some(Active {
+            session: started,
+            request: request.clone(),
+        });
         info!("Enabled");
         Ok(())
     }
