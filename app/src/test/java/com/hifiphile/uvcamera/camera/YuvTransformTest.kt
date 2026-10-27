@@ -75,19 +75,6 @@ class YuvTransformTest {
             }
         }
         assertArrayEquals("NV21 $t ${ow}x$oh", expectedNv21, nv21)
-
-        val yuyv = ByteArray(ow * oh * 2)
-        xf.toYuyv(yPlane, uPlane, vPlane, yuyv)
-        val expectedYuyv = ByteArray(yuyv.size).also { e ->
-            var o = 0
-            for (y in 0 until oh) for (p in 0 until ow / 2) {
-                e[o++] = ry[y][2 * p].toByte()
-                e[o++] = ru[y / 2][p].toByte()
-                e[o++] = ry[y][2 * p + 1].toByte()
-                e[o++] = rv[y / 2][p].toByte()
-            }
-        }
-        assertArrayEquals("YUYV $t ${ow}x$oh", expectedYuyv, yuyv)
     }
 
     @Test

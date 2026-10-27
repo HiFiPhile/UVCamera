@@ -75,7 +75,7 @@ data class FrameSpec(val width: Int, val height: Int, val intervals: List<Int>)
 
 data class FormatSpec(val kind: FormatKind, val frames: List<FrameSpec>) {
     companion object {
-        /** Same as uvcd's built-in defaults. */
+        /** uvcd's built-in MJPEG defaults. */
         fun defaults(): List<FormatSpec> {
             fun frame(w: Int, h: Int, vararg fps: Int) =
                 FrameSpec(w, h, fps.map(::fpsToInterval).sorted())
@@ -85,10 +85,6 @@ data class FormatSpec(val kind: FormatKind, val frames: List<FrameSpec>) {
                     frame(1920, 1080, 30, 15),
                     frame(1280, 720, 30, 15),
                     frame(640, 480, 30, 15),
-                )),
-                FormatSpec(FormatKind.YUYV, listOf(
-                    frame(640, 480, 30, 15),
-                    frame(1280, 720, 10),
                 )),
             )
         }

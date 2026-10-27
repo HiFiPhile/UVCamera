@@ -177,31 +177,4 @@ class YuvTransform(
             }
         }
     }
-
-    /** Transform to packed YUYV 4:2:2, repeating each chroma row twice. */
-    fun toYuyv(y: Plane, u: Plane, v: Plane, out: ByteArray) {
-        require(out.size >= outWidth * outHeight * 2) { "Output too small" }
-        val yw = lumaWalk(y)
-        val cw = chromaWalk(u)
-        val yd = y.data
-        val ud = u.data
-        val vd = v.data
-
-        var o = 0
-        for (row in 0 until outHeight) {
-            var yi = yw.starts[row]
-            val ys = yw.steps[row]
-            var ci = cw.starts[row / 2]
-            val cs = cw.steps[row / 2]
-            for (p in 0 until outWidth / 2) {
-                out[o++] = yd[yi]
-                out[o++] = ud[ci]
-                yi += ys
-                out[o++] = yd[yi]
-                out[o++] = vd[ci]
-                yi += ys
-                ci += cs
-            }
-        }
-    }
 }

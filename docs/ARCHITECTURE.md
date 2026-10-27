@@ -74,7 +74,7 @@ are produced in the app and handed to the daemon, which owns the V4L2 device.
     ├─ WebcamService   foreground service (type=camera); owns the session
     ├─ daemon/Client   protocol client (mirrors uvcd's ipc/message)
     ├─ camera/         Camera2 source; capability discovery → FormatSpec
-    ├─ encoder/        HW JPEG | libjpeg-turbo MJPEG | YUYV
+    ├─ encoder/        HW JPEG | libjpeg-turbo MJPEG
     └─ ui/             Compose: status, camera + format choice, controls
 ```
 
@@ -160,7 +160,6 @@ MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
   |---|---|---|---|
   | Camera2 `JPEG` stream | MJPEG | 0.7 ms copy per frame | The camera supports the size at the frame rate and no rotation is needed |
   | `YUV_420_888` → NV21 → `YuvImage` | MJPEG | ~38 ms per frame, two worker threads → 30 fps | Smaller sizes without hardware JPEG (720p/480p here), or rotated |
-  | `YUV_420_888` → YUYV repack | Uncompressed | a few ms | YUYV streams; USB 2.0 limits it to 640×480@30 |
 
 - **Orientation:** sensor images arrive unrotated. For a landscape mount (top
   of the phone to the left) the correction is `sensor − 90°` for back
@@ -236,8 +235,11 @@ selected camera's streamable sizes (≥ 30 fps), clipped to bandwidth:
 
 | Format | Default frames | Bandwidth (USB 2.0 HS isoc, ~24 MB/s theoretical) |
 |---|---|---|
-| MJPEG | 1920×1080, 1280×720, 640×480 @ 30/15 fps | 1080p30 ≈ 3–9 MB/s, fine |
-| YUYV | 640×480 @ 30, 1280×720 @ 10 | 640×480×2×30 = 18.4 MB/s, at the limit |
+| MJPEG | 1920×1080, 1280×720, 640×480 @ 30/15 fps; 60 fps up to 720p where the camera can | 1080p30 ≈ 3–9 MB/s, fine; 1080p60 doesn't fit at the minimum burst |
+
+The app doesn't offer YUYV: uncompressed 640×480@30 is 18.4 MB/s, at the
+limit, and higher sizes don't fit. uvcd still supports it for
+`uvcd gadget up`.
 
 `streaming_maxpacket=3072` (HS high-bandwidth, 3×1024) and, on SuperSpeed
 UDCs, `streaming_maxburst` raise isochronous throughput. On pre-6.13 kernels,

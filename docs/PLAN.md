@@ -304,6 +304,13 @@ Done so far:
       cargo-deny) and a tag-triggered release workflow that verifies the
       module against the committed certificate pin (docs/RELEASE.md).
       Rehearsed with a throwaway key on a tagged clone.
+- [x] 60 fps setting for cameras whose AE reaches 60 fps, MJPEG up to 720p
+      only: 1080p60 MJPEG needs more than the isochronous link carries at
+      the minimum burst (~24 MB/s); the daemon sent ~32 fps of 60 over
+      USB 2.0. Software JPEG uses four workers above 30 fps.
+- [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
+      to 640×480@30, which MJPEG does better. The daemon keeps it for
+      `uvcd gadget up`.
 
 Planned:
 

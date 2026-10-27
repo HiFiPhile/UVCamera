@@ -11,7 +11,7 @@ daemon. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/PLAN.md](docs/PLAN.md).
 
 **Status:** early development (Phase 3). Enable the webcam in the app and the
-host sees the back camera as MJPEG (up to 1080p30) or YUYV. The camera is on
+host sees the back camera as MJPEG (up to 1080p30, 720p60). The camera is on
 only while an app on the host is using it. `uvcd gadget up` still works for
 bring-up with a test pattern and no app.
 

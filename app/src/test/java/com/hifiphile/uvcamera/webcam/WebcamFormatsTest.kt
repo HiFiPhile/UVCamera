@@ -31,17 +31,16 @@ class WebcamFormatsTest {
             yuv = listOf(Resolution(1920, 1080), Resolution(1280, 720), Resolution(640, 480)),
         ))
 
-        assertEquals(listOf(FormatKind.MJPEG, FormatKind.YUYV), formats.map { it.kind })
+        assertEquals(listOf(FormatKind.MJPEG), formats.map { it.kind })
         assertEquals(
             listOf(1920 to 1080, 1280 to 720, 640 to 480),
             formats[0].frames.map { it.width to it.height },
         )
         assertEquals(listOf(333_333, 666_666), formats[0].frames[0].intervals)
-        assertEquals(listOf(640 to 480, 1280 to 720), formats[1].frames.map { it.width to it.height })
     }
 
     @Test
-    fun maxResolutionCapsBothFormats() {
+    fun maxResolutionCapsSizes() {
         val formats = webcamFormats(
             camera(
                 jpeg = listOf(Resolution(1920, 1080)),
@@ -50,10 +49,9 @@ class WebcamFormatsTest {
             maxHeight = 720,
         )
         assertEquals(listOf(1280 to 720, 640 to 480), formats[0].frames.map { it.width to it.height })
-        assertEquals(listOf(640 to 480, 1280 to 720), formats[1].frames.map { it.width to it.height })
 
         val vga = webcamFormats(camera(jpeg = emptyList(), yuv = listOf(Resolution(1280, 720), Resolution(640, 480))), maxHeight = 480)
-        assertEquals(listOf(listOf(640 to 480), listOf(640 to 480)), vga.map { f -> f.frames.map { it.width to it.height } })
+        assertEquals(listOf(listOf(640 to 480)), vga.map { f -> f.frames.map { it.width to it.height } })
     }
 
     @Test
@@ -115,9 +113,8 @@ class WebcamFormatsTest {
             listOf(listOf(333_333, 666_666), listOf(166_666, 333_333, 666_666), listOf(333_333, 666_666)),
             mjpeg.frames.map { it.intervals },
         )
-        // Off: 30 fps everywhere. YUYV never gets 60.
+        // Off: 30 fps everywhere.
         assertEquals(webcamFormats(camera(jpeg = sizes, yuv = sizes)), webcamFormats(oneplus, fps60 = false))
-        assertEquals(listOf(333_333, 666_666), webcamFormats(oneplus, fps60 = true)[1].frames[0].intervals)
 
         // 60 fps at 1080p only isn't enough to offer the setting.
         val only1080 = oneplus.copy(fastSizes = mapOf(StreamFormat.YUV to listOf(Resolution(1920, 1080))))

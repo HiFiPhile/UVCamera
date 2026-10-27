@@ -26,9 +26,6 @@ private const val MJPEG_FAST_MAX_HEIGHT = 720
 private fun fastMjpegSizes(camera: CameraInfo) =
     camera.fastSizes.values.flatten().filter { it.height <= MJPEG_FAST_MAX_HEIGHT }.toSet()
 
-/** YUYV is limited by USB 2.0 isochronous bandwidth (~24 MB/s). */
-private val YUYV_FRAMES = listOf(Resolution(640, 480) to listOf(30, 15), Resolution(1280, 720) to listOf(10))
-
 private fun frame(size: Resolution, fps: List<Int>) =
     FrameSpec(size.width, size.height, fps.map(::fpsToInterval).sorted())
 
@@ -39,9 +36,9 @@ fun supports60Fps(camera: CameraInfo): Boolean {
 }
 
 /**
- * Formats to advertise for [camera]: the standard webcam sizes up to
- * [maxHeight] that it can deliver at 30 fps, as hardware JPEG or as YUV for
- * software encoding. With [fps60], MJPEG sizes up to 720p that the camera
+ * Formats to advertise for [camera]: MJPEG at the standard webcam sizes up
+ * to [maxHeight] that it can deliver at 30 fps, as hardware JPEG or as YUV
+ * for software encoding. No YUYV: isochronous bandwidth limits it to 480p30. With [fps60], MJPEG sizes up to 720p that the camera
  * delivers at 60 fps offer 60 fps too, as the default. Falls back to the daemon's defaults if
  * the camera reports nothing usable.
  */
@@ -53,15 +50,7 @@ fun webcamFormats(camera: CameraInfo, maxHeight: Int = Int.MAX_VALUE, fps60: Boo
     val mjpeg = MJPEG_SIZES
         .filter { it.height <= maxHeight && (it in yuv || it in jpeg) }
         .map { frame(it, if (it in fast) MJPEG_FAST_FPS else MJPEG_FPS) }
-    val yuyv = YUYV_FRAMES
-        .filter { (size, _) -> size.height <= maxHeight && size in yuv }
-        .map { (size, fps) -> frame(size, fps) }
-
-    val formats = buildList {
-        if (mjpeg.isNotEmpty()) add(FormatSpec(FormatKind.MJPEG, mjpeg))
-        if (yuyv.isNotEmpty()) add(FormatSpec(FormatKind.YUYV, yuyv))
-    }
-    return formats.ifEmpty { FormatSpec.defaults() }
+    return if (mjpeg.isNotEmpty()) listOf(FormatSpec(FormatKind.MJPEG, mjpeg)) else FormatSpec.defaults()
 }
 
 /**

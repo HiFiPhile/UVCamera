@@ -47,9 +47,6 @@ enum class EncodeMode {
 
     /** YUV from the camera, transformed, compressed with YuvImage (libjpeg-turbo). */
     YUV_JPEG,
-
-    /** YUV from the camera, transformed and repacked to YUYV. */
-    YUYV,
 }
 
 /** Encoder and camera capture size for a stream. */
@@ -80,6 +77,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
          * @throws IllegalArgumentException if no capture size works
          */
         fun plan(chars: CameraCharacteristics, params: StreamParams, transform: Transform): CapturePlan {
+            require(params.kind == FormatKind.MJPEG) { "Only MJPEG is supported" }
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalArgumentException("Camera has no stream configurations")
             val maxDuration = maxFrameDurationNs(params.interval)
@@ -87,14 +85,13 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 map.getOutputMinFrameDuration(format, size) in 1..maxDuration
 
             val out = Size(params.width, params.height)
-            if (params.kind == FormatKind.MJPEG && transform.isIdentity &&
+            if (transform.isIdentity &&
                 map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
                 fastEnough(ImageFormat.JPEG, out)
             ) {
                 return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height)
             }
 
-            val mode = if (params.kind == FormatKind.YUYV) EncodeMode.YUYV else EncodeMode.YUV_JPEG
             val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
                 .filter { fastEnough(ImageFormat.YUV_420_888, it) }
                 .map { it.width to it.height }
@@ -102,7 +99,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                 ?: throw IllegalArgumentException(
                     "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
                         "with this camera")
-            return CapturePlan(mode, w, h)
+            return CapturePlan(EncodeMode.YUV_JPEG, w, h)
         }
 
         /**
@@ -580,8 +577,8 @@ private class PlaneSet {
 }
 
 /** Per-worker conversion buffers. */
-private class WorkerBuffers(width: Int, height: Int, mode: EncodeMode) {
-    val nv21 = if (mode == EncodeMode.YUV_JPEG) ByteArray(width * height * 3 / 2) else null
+private class WorkerBuffers(width: Int, height: Int) {
+    val nv21 = ByteArray(width * height * 3 / 2)
     val jpegOut = ByteArrayOutputStream(width * height / 4)
 }
 
@@ -619,7 +616,7 @@ private class FrameEncoder(
     } else {
         Executors.newFixedThreadPool(workerCount) { r -> Thread(r, "frame-encoder") }
     }
-    private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height, mode) }
+    private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height) }
 
     /** Free plane sets; one more than the workers so the camera never waits. */
     private val freeSets = ArrayDeque<PlaneSet>().apply {
@@ -699,19 +696,13 @@ private class FrameEncoder(
     private fun encode(set: PlaneSet, xf: YuvTransform, seq: Long, ptsUs: Long) {
         val start = System.nanoTime()
         try {
-            if (mode == EncodeMode.YUYV) {
-                val out = ByteArray(width * height * 2)
-                xf.toYuyv(set.y!!, set.u!!, set.v!!, out)
-                deliver(seq, out, out.size, ptsUs, System.nanoTime() - start)
-            } else {
-                val b = buffers.get()!!
-                xf.toNv21(set.y!!, set.u!!, set.v!!, b.nv21!!)
-                b.jpegOut.reset()
-                YuvImage(b.nv21, ImageFormat.NV21, width, height, null)
-                    .compressToJpeg(rect, JPEG_QUALITY, b.jpegOut)
-                deliver(seq, b.jpegOut.toByteArray(), b.jpegOut.size(), ptsUs,
-                    System.nanoTime() - start)
-            }
+            val b = buffers.get()!!
+            xf.toNv21(set.y!!, set.u!!, set.v!!, b.nv21)
+            b.jpegOut.reset()
+            YuvImage(b.nv21, ImageFormat.NV21, width, height, null)
+                .compressToJpeg(rect, JPEG_QUALITY, b.jpegOut)
+            deliver(seq, b.jpegOut.toByteArray(), b.jpegOut.size(), ptsUs,
+                System.nanoTime() - start)
         } finally {
             synchronized(freeSets) { freeSets.addLast(set) }
         }
