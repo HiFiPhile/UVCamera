@@ -324,6 +324,11 @@ Done so far:
       1.0–1.8 GHz of 3.6), so the saving shows as clock headroom rather
       than latency. `EncodeBench` also checks decoded Y/Cb/Cr against the
       walked planes (mean error < 0.25 at every rotation).
+- [x] Quarter turns at 60 fps: the back camera covers rotated 1080p60
+      from 2560×1920 (60 fps, ~15 ms per frame, nothing out of order). The
+      front camera has no size that covers it at 60 fps, so such a plan
+      falls back to capturing at 30 fps (`CapturePlan.fps`) instead of
+      failing; the host gets repeated frames.
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.

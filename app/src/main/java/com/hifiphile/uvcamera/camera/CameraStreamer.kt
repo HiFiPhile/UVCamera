@@ -29,6 +29,7 @@ import android.util.Size
 import com.hifiphile.uvcamera.daemon.ControlIds
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.StreamParams
+import com.hifiphile.uvcamera.daemon.fpsToInterval
 import com.hifiphile.uvcamera.webcam.AWB_PRESET_KELVIN
 import java.io.Closeable
 import java.util.ArrayDeque
@@ -46,8 +47,14 @@ enum class EncodeMode {
     YUV_JPEG,
 }
 
-/** Encoder and camera capture size for a stream. */
-data class CapturePlan(val mode: EncodeMode, val width: Int, val height: Int)
+/** Encoder, camera capture size and frame rate for a stream. */
+data class CapturePlan(
+    val mode: EncodeMode,
+    val width: Int,
+    val height: Int,
+    /** Camera frame rate: the stream's, or 30 if the camera can't do it here. */
+    val fps: Int,
+)
 
 /** Receives encoded frames: [length] bytes of [data], captured at [ptsUs]. */
 fun interface FrameSink {
@@ -73,29 +80,39 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
          * without a usable YUV size: its output is noisier (the YUV stream
          * gets more noise filtering) and it can't rotate or mirror.
          *
+         * Above 30 fps, a camera may lack a size that covers a quarter turn
+         * (the OnePlus 15 front camera at 1080p60); it then captures at 30
+         * fps and the daemon repeats frames.
+         *
          * @throws IllegalArgumentException if no capture size works
          */
         fun plan(chars: CameraCharacteristics, params: StreamParams, transform: Transform): CapturePlan {
             require(params.kind == FormatKind.MJPEG) { "Only MJPEG is supported" }
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: throw IllegalArgumentException("Camera has no stream configurations")
-            val maxDuration = maxFrameDurationNs(params.interval)
-            fun fastEnough(format: Int, size: Size) =
-                map.getOutputMinFrameDuration(format, size) in 1..maxDuration
+            val fps = Math.round(params.fps).toInt()
+            val rates = listOf(fps to params.interval) +
+                if (fps > 30) listOf(30 to fpsToInterval(30)) else emptyList()
 
-            val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
-                .filter { fastEnough(ImageFormat.YUV_420_888, it) }
-                .map { it.width to it.height }
-            chooseCaptureSize(yuvSizes, params.width, params.height, transform)?.let { (w, h) ->
-                return CapturePlan(EncodeMode.YUV_JPEG, w, h)
-            }
+            for ((rate, interval) in rates) {
+                val maxDuration = maxFrameDurationNs(interval)
+                fun fastEnough(format: Int, size: Size) =
+                    map.getOutputMinFrameDuration(format, size) in 1..maxDuration
 
-            val out = Size(params.width, params.height)
-            if (transform.isIdentity &&
-                map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
-                fastEnough(ImageFormat.JPEG, out)
-            ) {
-                return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height)
+                val yuvSizes = map.getOutputSizes(ImageFormat.YUV_420_888).orEmpty()
+                    .filter { fastEnough(ImageFormat.YUV_420_888, it) }
+                    .map { it.width to it.height }
+                chooseCaptureSize(yuvSizes, params.width, params.height, transform)?.let { (w, h) ->
+                    return CapturePlan(EncodeMode.YUV_JPEG, w, h, rate)
+                }
+
+                val out = Size(params.width, params.height)
+                if (transform.isIdentity &&
+                    map.getOutputSizes(ImageFormat.JPEG)?.contains(out) == true &&
+                    fastEnough(ImageFormat.JPEG, out)
+                ) {
+                    return CapturePlan(EncodeMode.HW_JPEG, params.width, params.height, rate)
+                }
             }
             throw IllegalArgumentException(
                 "Can't rotate ${transform.rotation.degrees}° at ${params.width}x${params.height} " +
@@ -437,7 +454,6 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
     ) {
         val chars = manager.getCameraCharacteristics(cameraId)
         val plan = plan(chars, params, transform)
-        val fps = Math.round(params.fps).toInt()
         Log.i(TAG, "Starting camera $cameraId: $params with $transform via $plan")
 
         val format = if (plan.mode == EncodeMode.HW_JPEG) ImageFormat.JPEG else ImageFormat.YUV_420_888
@@ -458,7 +474,7 @@ class CameraStreamer(private val manager: CameraManager, val cameraId: String) {
                     return
                 }
                 device = camera
-                createSession(camera, reader, chars, plan.mode, fps, onError)
+                createSession(camera, reader, chars, plan.mode, plan.fps, onError)
             }
 
             override fun onDisconnected(camera: CameraDevice) {
@@ -605,7 +621,7 @@ private class FrameEncoder(
     private var xform = makeTransform(transform)
 
     /** Enough workers for the frame rate: software JPEG at 1080p takes ~38 ms. */
-    private val workerCount = if (params.fps > 31) WORKERS * 2 else WORKERS
+    private val workerCount = if (plan.fps > 30) WORKERS * 2 else WORKERS
     private val workers = if (mode == EncodeMode.HW_JPEG) {
         null
     } else {
