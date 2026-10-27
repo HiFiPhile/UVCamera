@@ -5,8 +5,6 @@ package com.hifiphile.uvcamera.camera
 
 import android.annotation.SuppressLint
 import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -32,7 +30,6 @@ import com.hifiphile.uvcamera.daemon.ControlIds
 import com.hifiphile.uvcamera.daemon.FormatKind
 import com.hifiphile.uvcamera.daemon.StreamParams
 import com.hifiphile.uvcamera.webcam.AWB_PRESET_KELVIN
-import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.util.ArrayDeque
 import java.util.concurrent.Executor
@@ -45,7 +42,7 @@ enum class EncodeMode {
     /** The camera's hardware JPEG encoder: no CPU work per frame. */
     HW_JPEG,
 
-    /** YUV from the camera, transformed, compressed with YuvImage (libjpeg-turbo). */
+    /** YUV from the camera, transformed and compressed by [JpegEncoder]. */
     YUV_JPEG,
 }
 
@@ -581,12 +578,6 @@ private class PlaneSet {
     }
 }
 
-/** Per-worker conversion buffers. */
-private class WorkerBuffers(width: Int, height: Int) {
-    val nv21 = ByteArray(width * height * 3 / 2)
-    val jpegOut = ByteArrayOutputStream(width * height / 4)
-}
-
 /**
  * Turns each camera image into a frame for the host.
  *
@@ -608,7 +599,6 @@ private class FrameEncoder(
     private val mode = plan.mode
     private val width = params.width
     private val height = params.height
-    private val rect = Rect(0, 0, width, height)
 
     /** Swapped by [setTransform]; each frame uses whichever is current. */
     @Volatile
@@ -621,7 +611,6 @@ private class FrameEncoder(
     } else {
         Executors.newFixedThreadPool(workerCount) { r -> Thread(r, "frame-encoder") }
     }
-    private val buffers = ThreadLocal.withInitial { WorkerBuffers(width, height) }
 
     /** Free plane sets; one more than the workers so the camera never waits. */
     private val freeSets = ArrayDeque<PlaneSet>().apply {
@@ -701,13 +690,8 @@ private class FrameEncoder(
     private fun encode(set: PlaneSet, xf: YuvTransform, seq: Long, ptsUs: Long) {
         val start = System.nanoTime()
         try {
-            val b = buffers.get()!!
-            xf.toNv21(set.y!!, set.u!!, set.v!!, b.nv21)
-            b.jpegOut.reset()
-            YuvImage(b.nv21, ImageFormat.NV21, width, height, null)
-                .compressToJpeg(rect, JPEG_QUALITY, b.jpegOut)
-            deliver(seq, b.jpegOut.toByteArray(), b.jpegOut.size(), ptsUs,
-                System.nanoTime() - start)
+            val jpeg = JpegEncoder.encode(xf, set.y!!, set.u!!, set.v!!, JPEG_QUALITY)
+            deliver(seq, jpeg, jpeg.size, ptsUs, System.nanoTime() - start)
         } finally {
             synchronized(freeSets) { freeSets.addLast(set) }
         }

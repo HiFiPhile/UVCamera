@@ -97,7 +97,7 @@ class YuvTransform(
      * For each output row of a plane: the index of its first sample and the
      * index step per output pixel, given the plane's strides.
      */
-    private class RowWalk(val starts: IntArray, val steps: IntArray)
+    class RowWalk(val starts: IntArray, val steps: IntArray)
 
     private fun walk(w: Int, h: Int, ow: Int, oh: Int, cx: Int, cy: Int, rowStride: Int, pixelStride: Int): RowWalk {
         val starts = IntArray(oh)
@@ -143,38 +143,9 @@ class YuvTransform(
         return cWalk!!
     }
 
-    /** Transform to NV21 (Y plane, then interleaved V/U), as YuvImage expects. */
-    fun toNv21(y: Plane, u: Plane, v: Plane, out: ByteArray) {
-        require(out.size >= outWidth * outHeight * 3 / 2) { "Output too small" }
-        // U and V planes share strides in YUV_420_888.
-        val yw = lumaWalk(y)
-        val cw = chromaWalk(u)
-
-        var o = 0
-        for (row in 0 until outHeight) {
-            var i = yw.starts[row]
-            val step = yw.steps[row]
-            if (step == 1) {
-                System.arraycopy(y.data, i, out, o, outWidth)
-                o += outWidth
-            } else {
-                for (c in 0 until outWidth) {
-                    out[o++] = y.data[i]
-                    i += step
-                }
-            }
-        }
-
-        val ud = u.data
-        val vd = v.data
-        for (row in 0 until outHeight / 2) {
-            var i = cw.starts[row]
-            val step = cw.steps[row]
-            for (c in 0 until outWidth / 2) {
-                out[o++] = vd[i]
-                out[o++] = ud[i]
-                i += step
-            }
-        }
-    }
+    /**
+     * Walks for the output's luma rows over [y] and chroma rows over [u]
+     * (U and V planes share strides in YUV_420_888).
+     */
+    fun walks(y: Plane, u: Plane): Pair<RowWalk, RowWalk> = lumaWalk(y) to chromaWalk(u)
 }

@@ -64,17 +64,22 @@ class YuvTransformTest {
 
         val xf = YuvTransform(sw, sh, ow, oh, t)
 
-        val nv21 = ByteArray(ow * oh * 3 / 2)
-        xf.toNv21(yPlane, uPlane, vPlane, nv21)
-        val expectedNv21 = ByteArray(nv21.size).also { e ->
-            var o = 0
-            for (y in 0 until oh) for (x in 0 until ow) e[o++] = ry[y][x].toByte()
+        // Apply the walks as JpegEncoder's native code does, into I420.
+        val (yw, cw) = xf.walks(yPlane, uPlane)
+        val i420 = ByteArray(ow * oh * 3 / 2)
+        var o = 0
+        for (y in 0 until oh) for (x in 0 until ow) i420[o++] = yPlane.data[yw.starts[y] + x * yw.steps[y]]
+        for (plane in listOf(uPlane, vPlane)) {
             for (y in 0 until oh / 2) for (x in 0 until ow / 2) {
-                e[o++] = rv[y][x].toByte()
-                e[o++] = ru[y][x].toByte()
+                i420[o++] = plane.data[cw.starts[y] + x * cw.steps[y]]
             }
         }
-        assertArrayEquals("NV21 $t ${ow}x$oh", expectedNv21, nv21)
+        val expected = ByteArray(i420.size).also { e ->
+            var i = 0
+            for (y in 0 until oh) for (x in 0 until ow) e[i++] = ry[y][x].toByte()
+            for (r in listOf(ru, rv)) for (y in 0 until oh / 2) for (x in 0 until ow / 2) e[i++] = r[y][x].toByte()
+        }
+        assertArrayEquals("I420 $t ${ow}x$oh", expected, i420)
     }
 
     @Test

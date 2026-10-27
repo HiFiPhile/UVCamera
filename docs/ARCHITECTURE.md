@@ -158,7 +158,7 @@ MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
 
   | Path | Output | Cost (OnePlus 15, 1080p) | When |
   |---|---|---|---|
-  | `YUV_420_888` → NV21 → `YuvImage` | MJPEG | ~18 ms per frame upright, ~28 ms rotated; two worker threads at 30 fps, four above | Always, when the camera has a YUV size fast enough to cover the output |
+  | `YUV_420_888` → `JpegEncoder` (C transform, libjpeg-turbo) | MJPEG | ~5 ms per frame upright or 180°, ~6 ms at 90° at full clock; ~18 ms live, where the clocks stay low; two worker threads at 30 fps, four above | Always, when the camera has a YUV size fast enough to cover the output |
   | Camera2 `JPEG` stream | MJPEG | 0.7 ms copy per frame | Fallback without such a YUV size, if no rotation is needed. Visibly noisier than the YUV stream with the same noise reduction mode (OnePlus 15), and ~60% larger frames |
 
 - **Orientation:** sensor images arrive unrotated. For a landscape mount (top

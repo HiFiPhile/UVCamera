@@ -315,6 +315,15 @@ Done so far:
       reported noise reduction and edge modes (FAST), likely missing the
       YUV stream's temporal filtering, and ~60% larger.
       `NOISE_REDUCTION_MODE_HIGH_QUALITY` on it cut the camera to 6.4 fps.
+- [x] Native software JPEG: the transform in C (blocks of 16 rows for
+      quarter turns) and libjpeg-turbo 3.1.2 from I420, replacing the
+      Kotlin transform and `YuvImage`. 1080p at full clock (debug
+      `EncodeBench` via app_process): upright 6.1 → 4.9 ms, 180° 7.9 →
+      4.9 ms, 90° 10.1 → 6.0 ms. Live, the encode time stays ~18 ms: four
+      lightly loaded workers keep the clocks low (performance cores at
+      1.0–1.8 GHz of 3.6), so the saving shows as clock headroom rather
+      than latency. `EncodeBench` also checks decoded Y/Cb/Cr against the
+      walked planes (mean error < 0.25 at every rotation).
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.

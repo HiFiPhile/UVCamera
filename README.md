@@ -90,7 +90,7 @@ Daemon logs: `adb logcat -s uvcd`.
 ## Building
 
 Toolchain: JDK 21, Android SDK (platform 37, build-tools 37.0.0, NDK
-30.0.16248370), Rust with the Android targets, and
+30.0.16248370, CMake 3.31.6), Rust with the Android targets, and
 [`cargo-android`](https://github.com/chenxiaolong/cargo-android):
 
 ```sh
@@ -112,3 +112,7 @@ Signed releases, the module update channel and CI are described in
 ## License
 
 GPL-3.0-only. Portions are derived from MSD by Andrew Gunnerson.
+
+The app bundles [libjpeg-turbo](https://libjpeg-turbo.org/) (IJG,
+BSD-3-Clause and zlib licenses), downloaded at build time. This software is
+based in part on the work of the Independent JPEG Group.

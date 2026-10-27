@@ -78,6 +78,17 @@ android {
         targetSdk = 37
         versionCode = gitVersion.code
         versionName = gitVersion.name
+
+        // The daemon is arm64 only, so the app's native code is too.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
     }
     signingConfigs {
         // From the environment, so the key never touches the repository.
