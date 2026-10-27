@@ -180,10 +180,9 @@ MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
   gains from the sensor calibration (DNG method), else the nearest AWB
   preset. Controls are advertised for all cameras together, and each camera
   clamps or skips what it lacks.
-- **Live camera switch:** another camera with the same formats reopens on
-  the host's current stream with the host's control values (~110 ms, a few
-  repeated frames). A change of formats (resolution cap) re-enables the
-  daemon, which the host sees as a replug.
+- **Live camera switch:** formats and controls are the same for every
+  camera, so another camera reopens on the host's current stream with the
+  host's control values (~110 ms, a few repeated frames), without a replug.
 - **FrameSender:** one pending frame per source connection, so a slow socket
   drops stale frames instead of adding latency.
 

@@ -21,7 +21,6 @@
     <string name="webcam_error">Error: %1$s</string>
     <string name="webcam_camera_permission">Camera permission needed.</string>
     <string name="webcam_settings_camera">Camera</string>
-    <string name="webcam_settings_max_resolution">Maximum resolution (reconnects USB)</string>
     <string name="webcam_settings_title">Settings</string>
     <string name="webcam_settings_orientation">Orientation</string>
     <string name="webcam_rotation_chip">%1$d°</string>

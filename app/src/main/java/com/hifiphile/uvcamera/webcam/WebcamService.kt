@@ -22,8 +22,6 @@ import com.hifiphile.uvcamera.camera.FrameSink
 import com.hifiphile.uvcamera.camera.Transform
 import com.hifiphile.uvcamera.camera.queryCameras
 import com.hifiphile.uvcamera.daemon.Client
-import com.hifiphile.uvcamera.daemon.ControlCaps
-import com.hifiphile.uvcamera.daemon.FormatSpec
 import com.hifiphile.uvcamera.daemon.SourceChannel
 import com.hifiphile.uvcamera.daemon.SourceEvent
 import com.hifiphile.uvcamera.daemon.StreamParams
@@ -102,9 +100,6 @@ class WebcamService : Service() {
     private lateinit var streamer: CameraStreamer
     private var transform = Transform()
 
-    /** Formats advertised to the host; changing them re-enumerates. */
-    private var formats = emptyList<FormatSpec>()
-
     /** The host's current stream, to carry over to another camera. */
     private var stream: StreamParams? = null
 
@@ -177,11 +172,12 @@ class WebcamService : Service() {
             _state.update { it.copy(error = e.toString()) }
             return
         }
-        // Controls of every camera, so switching cameras keeps them.
+        // Formats and controls of every camera, so switching cameras keeps
+        // them without re-enumerating.
+        val formats = webcamFormats(cameras)
         val controls = webcamControls(cameras)
         synchronized(lock) {
             camera = WebcamSettings.pickCamera(cameras, settings.cameraId)!!
-            formats = webcamFormats(cameras, settings.maxResolution.height)
             transform = transformFor(camera, settings)
             streamer = CameraStreamer(manager, camera.id)
             Log.i(TAG, "Using camera ${camera.id} (sensor ${camera.sensorOrientation}°, " +
@@ -198,9 +194,9 @@ class WebcamService : Service() {
             }
             _state.update { it.copy(error = null) }
         }
-        // Another camera or resolution cap applies live too.
-        val sourceListener = settings.onSourceChanged {
-            switcher.execute { switchSource(manager, settings, cameras, controls) }
+        // Another camera applies live too.
+        val cameraListener = settings.onCameraChanged {
+            switcher.execute { switchCamera(manager, settings, cameras) }
         }
 
         while (!stopping) {
@@ -208,7 +204,7 @@ class WebcamService : Service() {
                 // The daemon keeps a session already enabled with the same
                 // formats, so the host only sees a replug if they changed
                 // (e.g. after an app update).
-                Client().use { it.enable(synchronized(lock) { formats }, controls) }
+                Client().use { it.enable(formats, controls) }
                 val client = Client()
                 val channel = try {
                     client.attachSource()
@@ -228,54 +224,29 @@ class WebcamService : Service() {
         }
 
         settings.removeListener(transformListener)
-        settings.removeListener(sourceListener)
+        settings.removeListener(cameraListener)
         synchronized(lock) { streamer.release() }
     }
 
     /**
-     * Follow the user's camera and resolution choice. Another camera takes
-     * over the host's stream directly (formats are the same for every
-     * camera); a new resolution cap re-enumerates the device.
+     * Follow the user's camera choice: the new camera takes over the host's
+     * stream directly, since formats and controls are the same for every
+     * camera.
      */
-    private fun switchSource(
-        manager: CameraManager,
-        settings: WebcamSettings,
-        cameras: List<CameraInfo>,
-        controls: ControlCaps,
-    ) {
+    private fun switchCamera(manager: CameraManager, settings: WebcamSettings, cameras: List<CameraInfo>) {
         if (stopping) return
         val next = WebcamSettings.pickCamera(cameras, settings.cameraId) ?: return
-        val nextFormats = webcamFormats(cameras, settings.maxResolution.height)
-        val reenumerate = synchronized(lock) {
-            val reenumerate = nextFormats != formats
-            if (next.id != camera.id || reenumerate) {
-                Log.i(TAG, "Switching to camera ${next.id}" + if (reenumerate) " with $nextFormats" else "")
-                streamer.releaseAndWait()
-                camera = next
-                formats = nextFormats
-                transform = transformFor(next, settings)
-                streamer = CameraStreamer(manager, next.id)
-                if (reenumerate) {
-                    // The daemon forgets the host's controls on enable.
-                    hostControls.clear()
-                    stream = null
-                } else {
-                    hostControls.forEach(streamer::setControl)
-                    stream?.let { streamer.start(it, transform, sink, onCameraError) }
-                }
-            }
-            reenumerate
+        synchronized(lock) {
+            if (next.id == camera.id) return
+            Log.i(TAG, "Switching to camera ${next.id}")
+            streamer.releaseAndWait()
+            camera = next
+            transform = transformFor(next, settings)
+            streamer = CameraStreamer(manager, next.id)
+            hostControls.forEach(streamer::setControl)
+            stream?.let { streamer.start(it, transform, sink, onCameraError) }
         }
         _state.update { it.copy(camera = cameraLabel(next), error = null) }
-
-        if (reenumerate) {
-            try {
-                Client().use { it.enable(nextFormats, controls) }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to re-enable with new formats", e)
-                _state.update { it.copy(error = e.message ?: e.toString()) }
-            }
-        }
     }
 
     /** Follow the host's streams until the channel closes. */

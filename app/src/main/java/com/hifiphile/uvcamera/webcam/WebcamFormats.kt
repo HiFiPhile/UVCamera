@@ -21,8 +21,8 @@ private fun frame(size: Resolution, fps: List<Int>) =
     FrameSpec(size.width, size.height, fps.map(::fpsToInterval).sorted())
 
 /**
- * Formats to advertise for [cameras]: MJPEG at the standard webcam sizes up
- * to [maxHeight] that any of them delivers at 30 fps, as hardware JPEG or as
+ * Formats to advertise for [cameras]: MJPEG at the standard webcam sizes
+ * that any of them delivers at 30 fps, as hardware JPEG or as
  * YUV for software encoding, with 60 fps where any delivers 60. They don't
  * depend on the selected camera, so switching cameras needs no
  * re-enumeration: a camera without a size streams the largest it has with
@@ -30,14 +30,14 @@ private fun frame(size: Resolution, fps: List<Int>) =
  * isochronous bandwidth limits it to 480p30. Falls back to the daemon's
  * defaults if no camera reports anything usable.
  */
-fun webcamFormats(cameras: List<CameraInfo>, maxHeight: Int = Int.MAX_VALUE): List<FormatSpec> {
+fun webcamFormats(cameras: List<CameraInfo>): List<FormatSpec> {
     val sizes = cameras.flatMap { c ->
         c.streamableSizes[StreamFormat.YUV].orEmpty() + c.streamableSizes[StreamFormat.JPEG].orEmpty()
     }.toSet()
     val fast = cameras.flatMap { it.fastSizes.values.flatten() }.toSet()
 
     val mjpeg = MJPEG_SIZES
-        .filter { it.height <= maxHeight && it in sizes }
+        .filter { it in sizes }
         .map { frame(it, if (it in fast) MJPEG_FAST_FPS else MJPEG_FPS) }
     return if (mjpeg.isNotEmpty()) listOf(FormatSpec(FormatKind.MJPEG, mjpeg)) else FormatSpec.defaults()
 }

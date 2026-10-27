@@ -340,6 +340,9 @@ Done so far:
       1856 of 1920 columns, 58.5 fps, ~90 ms), one held to 30 fps gets
       repeated frames. The orientation note went too: every stream uses the
       software encoder now.
+- [x] No maximum resolution setting either: the host picks the size, and
+      the formats only change with the app (an update), never with a
+      setting. Left: camera choice and orientation.
 - [x] Dropped YUYV from the app: USB 2.0 isochronous bandwidth limits it
       to 640×480@30, which MJPEG does better. The daemon keeps it for
       `uvcd gadget up`.

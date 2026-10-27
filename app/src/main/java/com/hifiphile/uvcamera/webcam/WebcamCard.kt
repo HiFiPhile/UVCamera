@@ -204,7 +204,6 @@ private fun WebcamSettingsRows() {
     var cameraId by remember {
         mutableStateOf(WebcamSettings.pickCamera(cameras, settings.cameraId)?.id)
     }
-    var maxResolution by remember { mutableStateOf(settings.maxResolution) }
     var rotation by remember { mutableStateOf(settings.rotation) }
     var mirrorH by remember { mutableStateOf(settings.mirrorH) }
     var mirrorV by remember { mutableStateOf(settings.mirrorV) }
@@ -223,24 +222,6 @@ private fun WebcamSettingsRows() {
                     settings.cameraId = camera.id
                 },
                 label = { Text(stringResource(R.string.webcam_camera_chip, camera.id, facingLabel(camera.facing))) },
-            )
-        }
-    }
-
-    Text(
-        stringResource(R.string.webcam_settings_max_resolution),
-        style = MaterialTheme.typography.labelLarge,
-        modifier = Modifier.padding(top = 8.dp),
-    )
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (resolution in MaxResolution.entries) {
-            FilterChip(
-                selected = resolution == maxResolution,
-                onClick = {
-                    maxResolution = resolution
-                    settings.maxResolution = resolution
-                },
-                label = { Text(resolution.label) },
             )
         }
     }

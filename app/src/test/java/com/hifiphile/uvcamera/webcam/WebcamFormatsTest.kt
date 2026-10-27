@@ -40,20 +40,8 @@ class WebcamFormatsTest {
     }
 
     @Test
-    fun maxResolutionCapsSizes() {
-        val formats = webcamFormats(
-            listOf(camera(
-                jpeg = listOf(Resolution(1920, 1080)),
-                yuv = listOf(Resolution(1920, 1080), Resolution(1280, 720), Resolution(640, 480)),
-            )),
-            maxHeight = 720,
-        )
-        assertEquals(listOf(1280 to 720, 640 to 480), formats[0].frames.map { it.width to it.height })
-
-        val vga = webcamFormats(
-            listOf(camera(jpeg = emptyList(), yuv = listOf(Resolution(1280, 720), Resolution(640, 480)))),
-            maxHeight = 480,
-        )
+    fun onlySizesSomeCameraDelivers() {
+        val vga = webcamFormats(listOf(camera(jpeg = emptyList(), yuv = listOf(Resolution(640, 480)))))
         assertEquals(listOf(listOf(640 to 480)), vga.map { f -> f.frames.map { it.width to it.height } })
     }
 
