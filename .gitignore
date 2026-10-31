@@ -13,3 +13,4 @@
 # Private signing material must never enter the repository.
 *.jks
 *.keystore
+/cert/
