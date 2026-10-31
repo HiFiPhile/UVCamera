@@ -5,7 +5,7 @@ gadget function (`CONFIG_USB_CONFIGFS_F_UVC`), so the host sees a standard
 USB Video Class camera and needs no drivers or apps. ADB and MTP keep working.
 
 <p>
-  <img src="docs/screenshots/webcam.png" width="270" alt="Webcam page: on/off, camera and orientation">
+  <img src="docs/screenshots/webcam.png" width="270" alt="Webcam page: streaming 1080p60, camera and orientation">
   <img src="docs/screenshots/device.png" width="270" alt="Device page: system and camera capabilities">
 </p>
 
