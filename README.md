@@ -4,17 +4,10 @@ Use a rooted Android phone as a USB webcam. UVCamera uses the kernel's UVC
 gadget function (`CONFIG_USB_CONFIGFS_F_UVC`), so the host sees a standard
 USB Video Class camera and needs no drivers or apps. ADB and MTP keep working.
 
-The design follows [MSD](https://github.com/HiFiPhile/MSD): a Magisk/KernelSU
-module runs a small privileged Rust daemon (`uvcd`) that configures the USB
-gadget. The app captures from the camera with Camera2 and streams frames to the
-daemon. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
-[docs/PLAN.md](docs/PLAN.md).
-
-**Status:** early development (Phase 4). Turn the webcam on in the app and the
-host sees any of the phone's cameras as MJPEG, up to 1080p60 (1080p30 on
-phones whose cameras can't do 60). The camera is on only while an app on the
-host is using it. `uvcd gadget up` still works for bring-up with a test
-pattern and no app.
+<p>
+  <img src="docs/screenshots/webcam.png" width="270" alt="Webcam page: on/off, camera and orientation">
+  <img src="docs/screenshots/device.png" width="270" alt="Device page: system and camera capabilities">
+</p>
 
 ## Requirements
 
@@ -110,8 +103,9 @@ on `PATH`, then:
 cargo test                                    # uvcd host unit tests
 ```
 
-Signed releases, the module update channel and CI are described in
-[docs/RELEASE.md](docs/RELEASE.md).
+How it works: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); progress and
+findings: [docs/PLAN.md](docs/PLAN.md). Signed releases, the module update
+channel and CI are described in [docs/RELEASE.md](docs/RELEASE.md).
 
 ## License
 
