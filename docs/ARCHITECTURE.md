@@ -149,8 +149,8 @@ MJPEG frames must start with a JPEG SOI marker and fit the negotiated size.
   `StreamStart` and `StreamStop`. The privacy indicator is therefore on only
   while the host is actually streaming.
 - **camera/**: `queryCameras` reads Camera2 capabilities, from which
-  `webcamFormats` builds the formats to advertise (standard sizes the camera
-  delivers at ≥ 30 fps, capped by the user's maximum resolution).
+  `webcamFormats` builds the formats to advertise (standard sizes any camera
+  delivers at ≥ 30 fps, at 60 fps where any camera can).
   `CameraStreamer` opens the selected camera with one `ImageReader`, using
   `TEMPLATE_PREVIEW` with video stabilization off (lower latency), the AE
   target fps range pinned to the stream's rate, and continuous-video AF.
@@ -277,8 +277,7 @@ MSD's style. Malformed input closes the connection.
   can't show stale frames. Frames are authorized once at attach, not per
   frame: they can only change what the host sees, not the gadget.
 
-MJPEG at 1080p30 is about 10 MB/s and YUYV at 640×480@30 about 18 MB/s, easy
-for a Unix socket. The daemon copies each frame into a mmap'd V4L2 buffer
+MJPEG at 1080p60 is about 12–18 MB/s, easy for a Unix socket. The daemon copies each frame into a mmap'd V4L2 buffer
 (~0.2 ms). A memfd ring with `V4L2_MEMORY_USERPTR`/`DMABUF` would avoid the
 copy, but measurements don't call for it.
 

@@ -10,10 +10,11 @@ gadget. The app captures from the camera with Camera2 and streams frames to the
 daemon. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** early development (Phase 3). Enable the webcam in the app and the
-host sees the back camera as MJPEG (up to 1080p30, 720p60). The camera is on
-only while an app on the host is using it. `uvcd gadget up` still works for
-bring-up with a test pattern and no app.
+**Status:** early development (Phase 4). Turn the webcam on in the app and the
+host sees any of the phone's cameras as MJPEG, up to 1080p60 (1080p30 on
+phones whose cameras can't do 60). The camera is on only while an app on the
+host is using it. `uvcd gadget up` still works for bring-up with a test
+pattern and no app.
 
 ## Requirements
 
@@ -26,16 +27,19 @@ bring-up with a test pattern and no app.
 
 1. Install the module ZIP with Magisk or KernelSU and reboot. It installs the
    UVCamera app.
-2. Open UVCamera, pick the camera and the maximum resolution, and tap
-   **Enable** (allow the camera permission). A "USB webcam is on"
-   notification appears.
+2. Open UVCamera, pick the camera, and tap **Turn on** (allow the camera
+   permission). A "USB webcam is on" notification appears.
 3. Plug the phone into the computer and choose "UVCamera" in any camera app.
    The phone's camera turns on only while the computer is using it.
 
-Mount the phone in landscape with its top to the left; if it's mounted the
-other way round, turn on **Rotate 180°**. The host's brightness control
-adjusts the camera's exposure compensation. Turn the webcam off from the app
-or the notification.
+The camera and the orientation apply live, without reconnecting the webcam.
+Rotate by 0°, 90°, 180° or 270° to match how the phone is mounted, and mirror
+left/right or up/down. The host always sees the same formats: a camera that
+can't fill a size gets black bars, and one limited to 30 fps has its frames
+repeated in a 60 fps stream. The host's brightness, zoom, focus, white
+balance and power line frequency controls drive the camera, where it
+supports them. The **Device** page shows what the phone and each camera can
+do. Turn the webcam off from the app or the notification.
 
 ## Checking a device
 
