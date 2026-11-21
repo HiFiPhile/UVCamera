@@ -1,5 +1,10 @@
 # Changelog
 
+### v0.2
+
+* Works on Android 17, where a new SELinux label in sysfs kept the daemon
+  from finding its video device and the host got no picture.
+
 ### v0.1
 
 First release.
