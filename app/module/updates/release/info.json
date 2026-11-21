@@ -1,6 +1,6 @@
 {
-    "version": "v0.1",
-    "versionCode": 256,
-    "zipUrl": "https://github.com/HiFiPhile/UVCamera/releases/download/v0.1/UVCamera-0.1-release.zip",
-    "changelog": "https://github.com/HiFiPhile/UVCamera/raw/v0.1/CHANGELOG.md"
+    "version": "v0.2",
+    "versionCode": 512,
+    "zipUrl": "https://github.com/HiFiPhile/UVCamera/releases/download/v0.2/UVCamera-0.2-release.zip",
+    "changelog": "https://github.com/HiFiPhile/UVCamera/raw/v0.2/CHANGELOG.md"
 }
