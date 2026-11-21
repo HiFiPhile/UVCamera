@@ -281,10 +281,12 @@ pub fn subcommand_sepatch(cli: &SepatchCli) -> Result<()> {
         ["getattr", "ioctl", "map", "open", "read", "write"]
     );
 
-    // Finding the video node and the controller's driver in sysfs.
+    // Finding the video node and the controller's driver in sysfs. Android
+    // 17 labels the USB controller's subtree, where the gadget's video node
+    // lives, sysfs_usb_host.
     let mut sysfs_types = vec![t_sysfs];
     sysfs_types.extend(
-        ["sysfs_udc", "sysfs_video"]
+        ["sysfs_udc", "sysfs_video", "sysfs_usb_host"]
             .iter()
             .filter_map(|n| pdb.get_type_id(*n)),
     );

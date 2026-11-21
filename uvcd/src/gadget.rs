@@ -461,9 +461,15 @@ impl Gadget {
                 return Ok(path);
             }
             if Instant::now() >= deadline {
+                let unreadable = unreadable_function_names();
                 bail!(
-                    "Video node for {}.{INSTANCE} did not appear within {timeout:?}",
-                    self.function
+                    "Video node for {}.{INSTANCE} did not appear within {timeout:?}{}",
+                    self.function,
+                    if unreadable.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (unreadable: {})", unreadable.join(", "))
+                    }
                 );
             }
             thread::sleep(Duration::from_millis(100));
@@ -495,6 +501,24 @@ fn find_video_node(function: &str) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+/// `function_name` attributes that exist but can't be read, typically
+/// because SELinux labels them with a type the daemon may not read.
+fn unreadable_function_names() -> Vec<String> {
+    let Ok(entries) = fs::read_dir("/sys/class/video4linux") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path().join("function_name");
+            match fs::read_to_string(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Some(format!("{path:?}: {e}")),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// How the streaming endpoint moves video data.

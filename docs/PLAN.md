@@ -472,6 +472,11 @@ Device matrix (to fill from `doctor.log`):
 - `/dev/video*` nodes are `system:camera 0660`, `u:object_r:video_device:s0`.
   The gadget node will appear as a new `/dev/videoN` with a `function_name`
   sysfs attribute.
+- **Android 17 (17.0.1.201, kernel 6.12.69, 2026-11-21)** labels the USB
+  controller's sysfs subtree `sysfs_usb_host`, including the gadget video
+  node's `function_name`. The daemon couldn't read it, never found its
+  node, and the webcam stayed dark. The policy now allows reading
+  `sysfs_usb_host`.
 - Camera2: 2 logical cameras (0 back, 1 front), both LEVEL_3. JPEG is
   reported at ≥ 30 fps for all listed sizes, but the **smallest JPEG size is
   1920×1080**. MJPEG at 720p/480p therefore needs the YUV → software JPEG
